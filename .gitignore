@@ -1,0 +1,36 @@
+# --- Generales
+.DS_Store
+Thumbs.db
+
+# --- Flutter/Dart
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+.melos_tool/
+.pub-cache/
+build/
+coverage/
+ios/Pods/
+android/.gradle/
+android/.settings/
+android/local.properties
+android/app/google-services.json
+android/app/release.keystore
+web/.dart_tool/
+
+# --- .NET
+**/bin/
+**/obj/
+**/out/
+
+# --- Config sensibles
+appsettings.json
+*.secret.json
+*.user
+secrets.json
+
+# --- IDE
+.vscode/
+.idea/
+*.iml
