@@ -1,0 +1,12 @@
+environment: inventario_app
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ftpconnect: ^2.0.10
+  sqflite: ^2.3.3+1
+  path_provider: ^2.1.4
+  path: ^1.9.0
+  csv: ^6.0.0
+  mobile_scanner: ^5.1.1
