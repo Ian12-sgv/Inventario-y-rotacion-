@@ -1,7 +1,8 @@
 // lib/screen/actualizardatos.dart
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../ftp_service.dart';
-import '../import_csv.dart';
+import '../database.dart';
 
 class ScreenActualizarDatos extends StatefulWidget {
   const ScreenActualizarDatos({super.key});
@@ -12,78 +13,73 @@ class ScreenActualizarDatos extends StatefulWidget {
 
 class _ScreenActualizarDatosState extends State<ScreenActualizarDatos> {
   bool _busy = false;
-  String _status = 'Presiona el botón para descargar e importar los archivos';
-  double? _progress; // 0..1
+  String _status = 'Presiona el botón para actualizar la base de datos';
+  double? _progress; // 0..1 (indeterminada cuando es null)
 
-  // Si quieres centralizar estas credenciales, muévelas a algún config.
-  final _ftp = FTPService(const FtpConfig(
+  // Config FTP — actualmente SIN TLS para diagnóstico (más estable en AVD).
+  // Cuando quieras volver a FTPS, cambia useFtpes a true.
+  static const FtpConfig _ftpCfg = FtpConfig(
     host: 'ftp.textilesyessica.com',
     user: 'Reportes@textilesyessica.com',
-    pass: 'j305317909', // <- clave corregida (antes estaba distinta)
+    pass: 'j305317909',
     remoteDir: '/exports',
-    useFtpes: true,
-  ));
-
-  final _importer = CsvImporter();
+    useFtpes: false, // ← pon true para FTPS (producción)
+  );
+  final FTPService _ftp = const FTPService(_ftpCfg);
 
   Future<void> _run() async {
     if (_busy) return;
     setState(() {
       _busy = true;
-      _status = 'Iniciando sincronización…';
+      _status = 'Conectando al FTP…';
       _progress = null;
     });
 
+    String fmt(Duration d) => (d.inMilliseconds / 1000).toStringAsFixed(2);
+    final swTotal = Stopwatch()..start();
+
     try {
-      // === 1) INVENTARIO ===
+      // 1) Descargar el paquete de base de datos listo
       setState(() {
-        _status = 'Descargando inventario.csv.gz…';
+        _status = 'Descargando my_database.db.gz…';
+        _progress = null; // barra indeterminada
+      });
+
+      final swDl = Stopwatch()..start();
+      final dbGzPath = await _ftp.downloadFromBase('my_database.db.gz');
+      swDl.stop();
+
+      // Métricas de descarga
+      final bytes = await File(dbGzPath).length();
+      final mb = bytes / (1024 * 1024);
+      final secs = swDl.elapsedMilliseconds / 1000.0;
+      final mbps = secs > 0 ? (mb / secs) : 0.0;
+
+      setState(() {
+        _status =
+            'Descarga completada: ${mb.toStringAsFixed(2)} MB en '
+            '${secs.toStringAsFixed(2)} s '
+            '(${mbps.toStringAsFixed(2)} MB/s). Preparando reemplazo…';
         _progress = null;
       });
-      final invGz = await _ftp.downloadFromBase('inventario.csv.gz');
 
-      int invDone = 0, invTotal = 0;
-      setState(() {
-        _status = 'Importando inventario…';
-        _progress = 0.0;
-      });
-      await _importer.importInventario(invGz, (cur, total) {
-        invDone = cur; invTotal = total;
-        if (total > 0) {
-          setState(() {
-            _status = 'Importando inventario: $cur/$total';
-            _progress = cur / total;
-          });
-        }
-      });
+      // 2) Reemplazar la base local (swap atómico)
+      final swSwap = Stopwatch()..start();
+      await replaceDatabaseFromGzip(dbGzPath); // valida GZIP y cabecera SQLite
+      // Abre para calentar conexión / validar esquema
+      await openDatabaseConnection();
+      swSwap.stop();
 
-      // === 2) COMPRAS ===
+      swTotal.stop();
       setState(() {
-        _status = 'Descargando compras.csv.gz…';
-        _progress = null;
-      });
-      final comGz = await _ftp.downloadFromBase('compras.csv.gz');
-
-      int comDone = 0, comTotal = 0;
-      setState(() {
-        _status = 'Importando compras…';
-        _progress = 0.0;
-      });
-      await _importer.importCompras(comGz, (cur, total) {
-        comDone = cur; comTotal = total;
-        if (total > 0) {
-          setState(() {
-            _status = 'Importando compras: $cur/$total';
-            _progress = cur / total;
-          });
-        }
-      });
-
-      setState(() {
-        _status = '¡Listo! Inventario ($invDone/$invTotal) y Compras ($comDone/$comTotal) importados ✅';
-        _progress = 1.0;
+        _status = 'OK ✅\n'
+            'Descarga: ${fmt(swDl.elapsed)}s (${mb.toStringAsFixed(2)} MB @ ${mbps.toStringAsFixed(2)} MB/s)\n'
+            'Reemplazo: ${fmt(swSwap.elapsed)}s\n'
+            'Total: ${fmt(swTotal.elapsed)}s';
+        _progress = 1.0; // completa
       });
     } catch (e) {
+      swTotal.stop();
       setState(() {
         _status = 'ERROR: $e';
         _progress = null;

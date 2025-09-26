@@ -1,4 +1,9 @@
-environment: inventario_app
+name: inventario_app
+description: App Flutter para consulta de inventario y compras
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
   sdk: ">=3.4.0 <4.0.0"
 
 dependencies:
@@ -10,3 +15,12 @@ dependencies:
   path: ^1.9.0
   csv: ^6.0.0
   mobile_scanner: ^5.1.1
+  collection: ^1.18.0        # (opcional, útil si usas firstOrNull)
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

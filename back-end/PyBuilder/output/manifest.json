@@ -1,0 +1,10 @@
+{
+  "db_gz": "my_database.db.gz",
+  "sha256": "499e51ec5480ca4b6ac4f7cc97d0c4264ce9f8971c3598eb2283daf6a66781dc",
+  "generated_at": "2025-09-26 12:05:40",
+  "rows": {
+    "inv_rows": 3,
+    "stock_rows": 10,
+    "com_rows": 10
+  }
+}
