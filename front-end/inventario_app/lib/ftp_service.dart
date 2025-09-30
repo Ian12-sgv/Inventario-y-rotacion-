@@ -13,6 +13,8 @@ class FtpConfig {
   final bool useFtpes;      // true = FTPS explícito
   final int port;
   final Duration timeout;
+  final bool preferIPv4;    // fuerza IPv4 si hay AAAA problemático
+  final String? fallbackIp; // IP a usar si falla DNS
 
   const FtpConfig({
     required this.host,
@@ -22,6 +24,8 @@ class FtpConfig {
     this.useFtpes = true,
     this.port = 21,
     this.timeout = const Duration(seconds: 90),
+    this.preferIPv4 = true,
+    this.fallbackIp,
   });
 }
 
@@ -29,15 +33,24 @@ class FTPService {
   final FtpConfig cfg;
   const FTPService(this.cfg);
 
-  FTPConnect _client() => FTPConnect(
-        cfg.host,
-        user: cfg.user,
-        pass: cfg.pass,
-        port: cfg.port,
-        securityType: cfg.useFtpes ? SecurityType.ftpes : SecurityType.ftp,
-        timeout: cfg.timeout.inSeconds,
-        showLog: true,
-      );
+  Future<String> _resolveHostForConnect() async {
+    try {
+      final addrs = await InternetAddress.lookup(cfg.host);
+      if (cfg.preferIPv4) {
+        final v4 = addrs.where((a) => a.type == InternetAddressType.IPv4);
+        if (v4.isNotEmpty) return v4.first.address;
+      }
+      return addrs.first.address;
+    } catch (e) {
+      if (cfg.fallbackIp != null) {
+        // Fallback si el DNS del emulador se cae
+        // ignore: avoid_print
+        print('[DNS] lookup falló ($e). Usando fallback ${cfg.fallbackIp}');
+        return cfg.fallbackIp!;
+      }
+      rethrow;
+    }
+  }
 
   Future<void> _cdToRemoteDir(FTPConnect ftp) async {
     final dir = cfg.remoteDir.trim().isEmpty ? '/' : cfg.remoteDir;
@@ -52,6 +65,7 @@ class FTPService {
     }
   }
 
+  /// Descarga un archivo (p.ej. inventario.csv) a /cache de forma atómica.
   Future<String> downloadFromBase(
     String fileName, {
     String? localName,
@@ -67,51 +81,53 @@ class FTPService {
     TimeoutException? lastTimeout;
 
     for (int attempt = 1; attempt <= maxRetries; attempt++) {
-      final ftp = _client();
+      final hostForConnect = await _resolveHostForConnect();
+      final ftp = FTPConnect(
+        hostForConnect,
+        user: cfg.user,
+        pass: cfg.pass,
+        port: cfg.port,
+        timeout: cfg.timeout.inSeconds, // segundos
+        showLog: true,
+        securityType: cfg.useFtpes ? SecurityType.ftpes : SecurityType.ftp,
+      );
+
       try {
-        print('[FTP] Connecting (attempt $attempt/$maxRetries)…');
+        // ignore: avoid_print
+        print('[FTP] Connecting to ${cfg.host} -> $hostForConnect:${cfg.port} (attempt $attempt/$maxRetries)…');
         final ok = await ftp.connect();
         if (!ok) throw const SocketException('FTP_CONNECT_FAILED');
 
-        await _cdToRemoteDir(ftp);
-
-        // Limpia restos
-        try {
-          if (await File(partPath).exists()) await File(partPath).delete();
-          if (attempt == 1 && await File(destPath).exists()) {
-            await File(destPath).delete();
-          }
-        } catch (_) {}
-
-        // Fuerza BINARIO para evitar corrupción de .gz
+        // CSV también se baja en binario para evitar traducciones de EOL
         await ftp.setTransferType(TransferType.binary);
 
-        print('[FTP] Download $fileName -> $partPath (binary)');
-        final okDl = await ftp.downloadFile(
-          fileName,
-          File(partPath),
-        );
-        if (!okDl) {
-          throw const SocketException('FTP_DOWNLOAD_FAILED');
-        }
+        await _cdToRemoteDir(ftp);
 
-        // Validación rápida GZIP si aplica
-        if (fileName.toLowerCase().endsWith('.gz')) {
-          final raf = await File(partPath).open();
-          final hdr = await raf.read(2);
-          await raf.close();
-          final isGzip = hdr.length == 2 && hdr[0] == 0x1f && hdr[1] == 0x8b;
-          if (!isGzip) {
-            try { await File(partPath).delete(); } catch (_) {}
-            throw const FormatException('Archivo descargado no es GZIP válido');
-          }
+        // Limpieza previa
+        try {
+          if (await File(partPath).exists()) await File(partPath).delete();
+          if (attempt == 1 && await File(destPath).exists()) await File(destPath).delete();
+        } catch (_) {}
+
+        // Descarga a .part y rename atómico
+        // ignore: avoid_print
+        print('[FTP] Download $fileName -> $partPath (binary)');
+        final okDl = await ftp.downloadFile(fileName, File(partPath));
+        if (!okDl) throw const SocketException('FTP_DOWNLOAD_FAILED');
+
+        final sz = await File(partPath).length();
+        if (sz <= 0) {
+          await File(partPath).delete().catchError((_) {});
+          throw const SocketException('FTP_EMPTY_DOWNLOAD');
         }
 
         await File(partPath).rename(destPath);
-        print('[FTP] OK downloaded: $destPath');
+        // ignore: avoid_print
+        print('[FTP] OK downloaded: $destPath ($sz bytes)');
         return destPath;
       } on SocketException catch (e) {
         lastSock = e;
+        // ignore: avoid_print
         print('[FTP] SocketException: $e');
         if (attempt < maxRetries) {
           await Future.delayed(Duration(seconds: 1 << (attempt - 1)));
@@ -120,6 +136,7 @@ class FTPService {
         rethrow;
       } on TimeoutException catch (e) {
         lastTimeout = e;
+        // ignore: avoid_print
         print('[FTP] Timeout: $e');
         if (attempt < maxRetries) {
           await Future.delayed(Duration(seconds: 1 << (attempt - 1)));

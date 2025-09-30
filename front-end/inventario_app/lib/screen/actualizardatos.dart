@@ -1,8 +1,10 @@
 // lib/screen/actualizardatos.dart
 import 'dart:io';
 import 'package:flutter/material.dart';
+
 import '../ftp_service.dart';
 import '../database.dart';
+import '../import_csv.dart';
 
 class ScreenActualizarDatos extends StatefulWidget {
   const ScreenActualizarDatos({super.key});
@@ -16,16 +18,20 @@ class _ScreenActualizarDatosState extends State<ScreenActualizarDatos> {
   String _status = 'Presiona el botón para actualizar la base de datos';
   double? _progress; // 0..1 (indeterminada cuando es null)
 
-  // Config FTP — actualmente SIN TLS para diagnóstico (más estable en AVD).
-  // Cuando quieras volver a FTPS, cambia useFtpes a true.
+  // Config FTP
   static const FtpConfig _ftpCfg = FtpConfig(
     host: 'ftp.textilesyessica.com',
+    // si tu FTPService no usa fallbackIp o preferIPv4, quita estas dos líneas
+    fallbackIp: '162.215.130.176',
+    preferIPv4: true,
     user: 'Reportes@textilesyessica.com',
     pass: 'j305317909',
     remoteDir: '/exports',
-    useFtpes: false, // ← pon true para FTPS (producción)
+    useFtpes: false, // pon true si usas FTPS estable
   );
+
   final FTPService _ftp = const FTPService(_ftpCfg);
+  final CsvImporter _importer = CsvImporter();
 
   Future<void> _run() async {
     if (_busy) return;
@@ -38,45 +44,93 @@ class _ScreenActualizarDatosState extends State<ScreenActualizarDatos> {
     String fmt(Duration d) => (d.inMilliseconds / 1000).toStringAsFixed(2);
     final swTotal = Stopwatch()..start();
 
+    Duration dlInv = Duration.zero,
+        impInv = Duration.zero,
+        dlComp = Duration.zero,
+        impComp = Duration.zero;
+    String? comprasNote;
+
     try {
-      // 1) Descargar el paquete de base de datos listo
+      // ============ 1) INVENTARIO ============
       setState(() {
-        _status = 'Descargando my_database.db.gz…';
-        _progress = null; // barra indeterminada
-      });
-
-      final swDl = Stopwatch()..start();
-      final dbGzPath = await _ftp.downloadFromBase('my_database.db.gz');
-      swDl.stop();
-
-      // Métricas de descarga
-      final bytes = await File(dbGzPath).length();
-      final mb = bytes / (1024 * 1024);
-      final secs = swDl.elapsedMilliseconds / 1000.0;
-      final mbps = secs > 0 ? (mb / secs) : 0.0;
-
-      setState(() {
-        _status =
-            'Descarga completada: ${mb.toStringAsFixed(2)} MB en '
-            '${secs.toStringAsFixed(2)} s '
-            '(${mbps.toStringAsFixed(2)} MB/s). Preparando reemplazo…';
+        _status = 'Descargando inventario.csv…';
         _progress = null;
       });
+      final t1 = Stopwatch()..start();
+      final invCsvPath = await _ftp.downloadFromBase('inventario.csv');
+      t1.stop(); dlInv = t1.elapsed;
 
-      // 2) Reemplazar la base local (swap atómico)
-      final swSwap = Stopwatch()..start();
-      await replaceDatabaseFromGzip(dbGzPath); // valida GZIP y cabecera SQLite
-      // Abre para calentar conexión / validar esquema
-      await openDatabaseConnection();
-      swSwap.stop();
+      final invBytes = await File(invCsvPath).length();
+      final invMB = invBytes / (1024 * 1024);
+      final invSecs = dlInv.inMilliseconds / 1000.0;
+      final invMbps = invSecs > 0 ? (invMB / invSecs) : 0.0;
+
+      setState(() {
+        _status = 'Descarga inventario: ${invMB.toStringAsFixed(2)} MB en '
+            '${invSecs.toStringAsFixed(2)} s (${invMbps.toStringAsFixed(2)} MB/s). '
+            'Importando…';
+        _progress = 0.0;
+      });
+
+      final t2 = Stopwatch()..start();
+      await _importer.importInventario(invCsvPath, (cur, total) {
+        if (!mounted) return;
+        if (total <= 0) {
+          setState(() => _progress = null);
+        } else {
+          setState(() {
+            _progress = (cur / total).clamp(0.0, 1.0);
+            _status = 'Importando inventario… $cur / $total';
+          });
+        }
+      });
+      t2.stop(); impInv = t2.elapsed;
+
+      // ============ 2) COMPRAS ============
+      try {
+        setState(() {
+          _status = 'Descargando compras.csv…';
+          _progress = null;
+        });
+        final t3 = Stopwatch()..start();
+        final compCsvPath = await _ftp.downloadFromBase('compras.csv');
+        t3.stop(); dlComp = t3.elapsed;
+
+        setState(() {
+          _status = 'Importando compras.csv…';
+          _progress = 0.0;
+        });
+        final t4 = Stopwatch()..start();
+        await _importer.importCompras(compCsvPath, (cur, total) {
+          if (!mounted) return;
+          if (total <= 0) {
+            setState(() => _progress = null);
+          } else {
+            setState(() {
+              _progress = (cur / total).clamp(0.0, 1.0);
+              _status = 'Importando compras… $cur / $total';
+            });
+          }
+        });
+        t4.stop(); impComp = t4.elapsed;
+      } catch (e) {
+        // compras.csv no existe o falló: seguimos con OK parcial
+        comprasNote = 'Compras omitidas: $e';
+      }
+
+      await openDatabaseConnection(); // “calienta”/valida
 
       swTotal.stop();
+      final comprasTxt = (dlComp == Duration.zero && impComp == Duration.zero)
+          ? (comprasNote ?? 'Compras: (no importadas)')
+          : 'Compras → Descarga: ${fmt(dlComp)}s | Importación: ${fmt(impComp)}s';
+
       setState(() {
         _status = 'OK ✅\n'
-            'Descarga: ${fmt(swDl.elapsed)}s (${mb.toStringAsFixed(2)} MB @ ${mbps.toStringAsFixed(2)} MB/s)\n'
-            'Reemplazo: ${fmt(swSwap.elapsed)}s\n'
+            'Inventario → Descarga: ${fmt(dlInv)}s | Importación: ${fmt(impInv)}s\n'
+            '$comprasTxt\n'
             'Total: ${fmt(swTotal.elapsed)}s';
-        _progress = 1.0; // completa
+        _progress = 1.0;
       });
     } catch (e) {
       swTotal.stop();
@@ -90,9 +144,7 @@ class _ScreenActualizarDatosState extends State<ScreenActualizarDatos> {
         );
       }
     } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -133,7 +185,10 @@ class _ScreenActualizarDatosState extends State<ScreenActualizarDatos> {
                         icon: const Icon(Icons.cloud_download),
                         label: const Text('Actualizar Datos'),
                         style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 14),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 40,
+                            vertical: 14,
+                          ),
                           textStyle: const TextStyle(fontSize: 18),
                         ),
                       ),

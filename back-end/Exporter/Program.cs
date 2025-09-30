@@ -1,10 +1,10 @@
 ﻿using System;
 using System.IO;
-using System.IO.Compression;
 using System.Text;
 using System.Threading.Tasks;
+using System.Globalization;
 using FluentFTP;
-using Microsoft.Data.SqlClient;                  // proveedor SQL moderno
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 
 #region POCOs de config
@@ -20,7 +20,6 @@ public sealed class FtpConfig {
 public sealed class OutputConfig {
     public string Directory { get; init; } = "out";
     public string CsvName { get; init; } = "inventario.csv";
-    public string GzipName { get; init; } = "inventario.csv.gz";
 }
 public sealed class QueryConfig { public string SqlText { get; init; } = ""; }
 #endregion
@@ -28,7 +27,6 @@ public sealed class QueryConfig { public string SqlText { get; init; } = ""; }
 public static class Program {
     public static async Task<int> Main() {
         var cfg    = BuildConfig();
-        // Requiere paquete: Microsoft.Extensions.Configuration.Binder
         var sql    = cfg.GetRequiredSection("Sql").Get<SqlConfig>()!;
         var ftpCfg = cfg.GetRequiredSection("Ftp").Get<FtpConfig>()!;
         var outCfg = cfg.GetRequiredSection("Output").Get<OutputConfig>()!;
@@ -37,37 +35,36 @@ public static class Program {
         var outDir   = Path.GetFullPath(outCfg.Directory);
         Directory.CreateDirectory(outDir);
         var csvPath  = Path.Combine(outDir, outCfg.CsvName);
-        var gzPath   = Path.Combine(outDir, outCfg.GzipName);
 
-        var tmpRemote   = $"{TrimSlash(ftpCfg.RemoteDir)}/{outCfg.GzipName}.part";
-        var finalRemote = $"{TrimSlash(ftpCfg.RemoteDir)}/{outCfg.GzipName}";
+        var remoteDir   = TrimSlash(ftpCfg.RemoteDir);
+        var tmpRemote   = $"{remoteDir}/{outCfg.CsvName}.part";
+        var finalRemote = $"{remoteDir}/{outCfg.CsvName}";
 
         try {
-            Log("=== MVP-0 Exporter ===");
+            Log("=== ExporterInventario (CSV plano) ===");
 
             Log("1) SQL → CSV …");
             await ExportCsvAsync(sql.ConnectionString, qry.SqlText, csvPath);
 
-            Log("2) CSV → GZIP …");
-            Gzip(csvPath, gzPath);
-
-            Log($"3) FTP conectar {(ftpCfg.UseFtpes ? "(FTPS explícito)" : "(FTP plano)")} …");
-            using var client = new FtpClient(ftpCfg.Host, ftpCfg.User, ftpCfg.Pass, ftpCfg.Port);
-            // Config en v50:
-            client.Config.EncryptionMode         = ftpCfg.UseFtpes ? FtpEncryptionMode.Explicit : FtpEncryptionMode.None;
-            client.Config.ValidateAnyCertificate = ftpCfg.UseFtpes; // en PROD valida tu cert real
-            client.Config.DataConnectionType     = FtpDataConnectionType.AutoPassive;
-            client.Config.ReadTimeout            = 30000;
-            client.Config.ConnectTimeout         = 15000;
+            Log($"2) FTP conectar {(ftpCfg.UseFtpes ? "(FTPS explícito)" : "(FTP plano)")} …");
+            using var client = new FtpClient(ftpCfg.Host, ftpCfg.User, ftpCfg.Pass, ftpCfg.Port) {
+                Config = {
+                    EncryptionMode         = ftpCfg.UseFtpes ? FtpEncryptionMode.Explicit : FtpEncryptionMode.None,
+                    ValidateAnyCertificate = ftpCfg.UseFtpes, // en PROD valida tu cert real
+                    DataConnectionType     = FtpDataConnectionType.AutoPassive,
+                    ReadTimeout            = 30000,
+                    ConnectTimeout         = 15000
+                }
+            };
 
             client.Connect();
 
-            Log($"3.1) Asegurar directorio remoto: {ftpCfg.RemoteDir}");
-            client.CreateDirectory(ftpCfg.RemoteDir);
+            Log($"2.1) Asegurar directorio remoto: {remoteDir}");
+            client.CreateDirectory(remoteDir);
 
-            Log($"3.2) Subiendo temporal: {tmpRemote}");
+            Log($"2.2) Subiendo temporal: {tmpRemote}");
             var status = client.UploadFile(
-                localPath: gzPath,
+                localPath: csvPath,
                 remotePath: tmpRemote,
                 existsMode: FtpRemoteExists.Overwrite,
                 createRemoteDir: true
@@ -75,13 +72,12 @@ public static class Program {
             if (status != FtpStatus.Success && status != FtpStatus.Skipped)
                 throw new Exception($"Upload status inesperado: {status}");
 
-            Log("3.3) Rename atómico a destino final …");
+            Log("2.3) Rename atómico a destino final …");
             if (client.FileExists(finalRemote))
                 client.DeleteFile(finalRemote);
-
             client.Rename(tmpRemote, finalRemote);
 
-            Log("OK ✅ Proceso completado");
+            Log("OK ✅ Proceso completado (CSV)");
             client.Disconnect();
             return 0;
         } catch (Exception ex) {
@@ -103,6 +99,8 @@ public static class Program {
 
     private static void Log(string msg) => Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}");
 
+    // Escribe CSV UTF-8 sin BOM, con comas y comillas escapadas.
+    // Números/fechas en CultureInfo.InvariantCulture → punto decimal.
     private static async Task ExportCsvAsync(string connStr, string sql, string csvPath) {
         await using var conn = new SqlConnection(connStr);
         await conn.OpenAsync();
@@ -111,7 +109,9 @@ public static class Program {
         await using var rdr = await cmd.ExecuteReaderAsync();
 
         await using var fs = new FileStream(csvPath, FileMode.Create, FileAccess.Write, FileShare.None);
-        await using var sw = new StreamWriter(fs, new UTF8Encoding(false)); // UTF-8 sin BOM
+        await using var sw = new StreamWriter(fs, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)) {
+            NewLine = "\n" // normaliza a LF (opcional)
+        };
 
         // Encabezados
         for (int i = 0; i < rdr.FieldCount; i++) {
@@ -124,7 +124,7 @@ public static class Program {
         while (await rdr.ReadAsync()) {
             for (int i = 0; i < rdr.FieldCount; i++) {
                 if (i > 0) await sw.WriteAsync(',');
-                string cell = rdr.IsDBNull(i) ? "" : rdr.GetValue(i).ToString() ?? "";
+                var cell = FormatValue(rdr.GetValue(i)); // invariante
                 await sw.WriteAsync(CsvEscape(cell));
             }
             await sw.WriteLineAsync();
@@ -132,16 +132,18 @@ public static class Program {
         await sw.FlushAsync();
     }
 
+    private static string FormatValue(object? v) {
+        if (v is null || v is DBNull) return "";
+        // Fuerza punto decimal y formato estable para números y fechas
+        return v switch {
+            IFormattable f => f.ToString(null, CultureInfo.InvariantCulture) ?? "",
+            _ => v.ToString() ?? ""
+        };
+    }
+
     private static string CsvEscape(string s) {
         bool needsQuotes = s.Contains(',') || s.Contains('"') || s.Contains('\n') || s.Contains('\r');
         return needsQuotes ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
-    }
-
-    private static void Gzip(string inputPath, string outputPath) {
-        using var src = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        using var dst = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
-        using var gz  = new GZipStream(dst, CompressionLevel.SmallestSize);
-        src.CopyTo(gz);
     }
     #endregion
 }
