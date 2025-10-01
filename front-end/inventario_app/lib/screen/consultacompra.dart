@@ -146,7 +146,7 @@ class _ScreenComprasState extends State<ScreenCompras> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildRegistroCabecera('Galpón: ${r['NombreGalpon'] ?? ''}', doc),
+                _buildRegistroCabecera('Grupo Palacios', doc),
                 const Divider(),
                 _buildRegistroDetalle(Icons.qr_code, 'Código', '${r['CodigoBarra'] ?? ''}'),
                 _buildRegistroDetalle(Icons.article, 'Referencia', '${r['Referencia'] ?? ''}'),

@@ -17,6 +17,14 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
   Map<String, dynamic>? _producto;
   List<Map<String, dynamic>> _stock = [];
   int _totalGeneral = 0;
+  int _totalCasaMatriz = 0;
+  int _totalTiendas = 0;
+
+  bool _isCasaMatriz(String tienda) {
+    final t = (tienda).toLowerCase();
+    // Detecta "casa matriz" aunque haya espacios múltiples
+    return RegExp(r'\bcasa\s*matriz\b', caseSensitive: false).hasMatch(t);
+  }
 
   Future<void> _buscarRegistroPorCodigo(String codigoBarra) async {
     final code = codigoBarra.trim();
@@ -41,12 +49,23 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
       orderBy: 'Tienda COLLATE NOCASE ASC',
     );
 
-    final total = stk.fold<int>(0, (sum, r) => sum + (r['Existencia'] as int? ?? 0));
+    // Totales
+    int total = 0;
+    int totalCM = 0;
+    for (final r in stk) {
+      final ex = (r['Existencia'] as int?) ?? 0;
+      final tienda = (r['Tienda'] as String?) ?? '';
+      total += ex;
+      if (_isCasaMatriz(tienda)) totalCM += ex;
+    }
+    final totalOtras = total - totalCM;
 
     setState(() {
       _producto = prod.isNotEmpty ? prod.first : null;
       _stock = stk;
       _totalGeneral = total;
+      _totalCasaMatriz = totalCM;
+      _totalTiendas = totalOtras;
     });
 
     _searchController.clear();
@@ -124,9 +143,24 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
                 children: [
                   const Text('Existencia por tienda', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  ..._stock.map((r) => _StockTile(tienda: '${r['Tienda']}', existencia: (r['Existencia'] as int?) ?? 0)),
+                  ..._stock.map((r) {
+                    final tienda = '${r['Tienda']}';
+                    final existencia = (r['Existencia'] as int?) ?? 0;
+                    final esCM = _isCasaMatriz(tienda);
+                    return _StockTile(
+                      tienda: tienda,
+                      existencia: existencia,
+                      isCasaMatriz: esCM,
+                    );
+                  }),
+                  const SizedBox(height: 12),
+
+                  // TOTALES
+                  _TotalTile(label: 'Total Casa Matriz', total: _totalCasaMatriz, color: Colors.indigo),
                   const SizedBox(height: 8),
-                  _TotalTile(total: _totalGeneral),
+                  _TotalTile(label: 'Total Tiendas', total: _totalTiendas, color: Colors.deepPurple),
+                  const SizedBox(height: 8),
+                  _TotalTile(label: 'Total General', total: _totalGeneral, color: Colors.teal),
                 ],
               ),
           ],
@@ -175,18 +209,27 @@ class _ProductoCard extends StatelessWidget {
 class _StockTile extends StatelessWidget {
   final String tienda;
   final int existencia;
-  const _StockTile({required this.tienda, required this.existencia});
+  final bool isCasaMatriz;
+  const _StockTile({
+    required this.tienda,
+    required this.existencia,
+    this.isCasaMatriz = false,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final bg = isCasaMatriz ? Colors.amber.shade100 : Colors.grey.shade100;
+    final icon = isCasaMatriz ? Icons.home_filled : Icons.storefront;
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
       decoration: BoxDecoration(
-        color: Colors.grey.shade100, borderRadius: BorderRadius.circular(10),
+        color: bg, borderRadius: BorderRadius.circular(10),
       ),
       child: Row(
         children: [
+          Icon(icon, size: 18, color: Colors.black54),
+          const SizedBox(width: 8),
           Expanded(child: Text(tienda, style: const TextStyle(fontWeight: FontWeight.w600))),
           Text('x$existencia', style: const TextStyle(fontSize: 16)),
         ],
@@ -196,18 +239,20 @@ class _StockTile extends StatelessWidget {
 }
 
 class _TotalTile extends StatelessWidget {
+  final String label;
   final int total;
-  const _TotalTile({required this.total});
+  final Color color;
+  const _TotalTile({required this.label, required this.total, required this.color});
 
   @override
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(color: Colors.teal, borderRadius: BorderRadius.circular(10)),
+      decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          const Text('Total General', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
           Text('$total', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         ],
       ),
