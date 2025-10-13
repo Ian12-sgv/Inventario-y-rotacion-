@@ -15,14 +15,19 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
   final FocusNode _focusNode = FocusNode();
 
   Map<String, dynamic>? _producto;
+  // Lista plana (por compatibilidad si la necesitas luego)
   List<Map<String, dynamic>> _stock = [];
+
+  // Agrupado por región
+  Map<String, List<Map<String, dynamic>>> _stockPorRegion = {};
+  Map<String, int> _totalesPorRegion = {};
+
   int _totalGeneral = 0;
   int _totalCasaMatriz = 0;
   int _totalTiendas = 0;
 
   bool _isCasaMatriz(String tienda) {
     final t = (tienda).toLowerCase();
-    // Detecta "casa matriz" aunque haya espacios múltiples
     return RegExp(r'\bcasa\s*matriz\b', caseSensitive: false).hasMatch(t);
   }
 
@@ -32,7 +37,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
     final Database db = await openDatabaseConnection();
 
-    // Producto (inventarioc)
+    // Producto (inventarioc): ahora incluye CostoDolar y DolarMayor
     final prod = await db.query(
       'inventarioc',
       where: 'CodigoBarra = ?',
@@ -40,29 +45,41 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
       limit: 1,
     );
 
-    // Stock dinámico (tienda / existencia)
+    // Stock dinámico (tienda / region / existencia)
     final stk = await db.query(
       'stock',
-      columns: ['Tienda', 'Existencia'],
+      columns: ['Tienda', 'Region', 'Existencia'],
       where: 'CodigoBarra = ?',
       whereArgs: [code],
-      orderBy: 'Tienda COLLATE NOCASE ASC',
+      orderBy: 'Region COLLATE NOCASE ASC, Tienda COLLATE NOCASE ASC',
     );
 
-    // Totales
+    // Totales y agrupación por región
     int total = 0;
     int totalCM = 0;
+    final Map<String, List<Map<String, dynamic>>> byRegion = {};
+    final Map<String, int> totalsRegion = {};
+
     for (final r in stk) {
       final ex = (r['Existencia'] as int?) ?? 0;
       final tienda = (r['Tienda'] as String?) ?? '';
+      final regionRaw = (r['Region'] as String?) ?? '';
+      final region = regionRaw.trim().isEmpty ? 'Sin región' : regionRaw.trim();
+
       total += ex;
       if (_isCasaMatriz(tienda)) totalCM += ex;
+
+      byRegion.putIfAbsent(region, () => []).add(r);
+      totalsRegion.update(region, (old) => old + ex, ifAbsent: () => ex);
     }
+
     final totalOtras = total - totalCM;
 
     setState(() {
       _producto = prod.isNotEmpty ? prod.first : null;
       _stock = stk;
+      _stockPorRegion = byRegion;
+      _totalesPorRegion = totalsRegion;
       _totalGeneral = total;
       _totalCasaMatriz = totalCM;
       _totalTiendas = totalOtras;
@@ -98,6 +115,8 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
     super.dispose();
   }
 
+  String _val(Map<String, dynamic> map, String k) => (map[k] ?? '').toString();
+
   @override
   Widget build(BuildContext context) {
     final p = _producto;
@@ -107,6 +126,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
+            // Buscador
             Container(
               decoration: BoxDecoration(
                 color: Colors.white, borderRadius: BorderRadius.circular(12),
@@ -133,26 +153,48 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
             ),
             const SizedBox(height: 20),
 
+            // Producto + precios
             if (p != null) _ProductoCard(p),
 
             const SizedBox(height: 16),
 
+            // Existencia agrupada por región
             if (_stock.isNotEmpty)
               Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text('Existencia por tienda', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  const Text('Existencia por región', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  ..._stock.map((r) {
-                    final tienda = '${r['Tienda']}';
-                    final existencia = (r['Existencia'] as int?) ?? 0;
-                    final esCM = _isCasaMatriz(tienda);
-                    return _StockTile(
-                      tienda: tienda,
-                      existencia: existencia,
-                      isCasaMatriz: esCM,
+
+                  ..._stockPorRegion.entries.map((e) {
+                    final region = e.key;
+                    final items = e.value;
+                    final totalRegion = _totalesPorRegion[region] ?? 0;
+
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.white, borderRadius: BorderRadius.circular(12),
+                        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 2))],
+                      ),
+                      child: ExpansionTile(
+                        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+                        title: Text('$region — $totalRegion', style: const TextStyle(fontWeight: FontWeight.w700)),
+                        childrenPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        children: items.map((r) {
+                          final tienda = '${r['Tienda'] ?? ''}';
+                          final existencia = (r['Existencia'] as int?) ?? 0;
+                          final esCM = _isCasaMatriz(tienda);
+                          return _StockTile(
+                            tienda: tienda,
+                            existencia: existencia,
+                            isCasaMatriz: esCM,
+                          );
+                        }).toList(),
+                      ),
                     );
                   }),
+
                   const SizedBox(height: 12),
 
                   // TOTALES
@@ -175,9 +217,31 @@ class _ProductoCard extends StatelessWidget {
   const _ProductoCard(this.p);
 
   String _val(String k) => (p[k] ?? '').toString();
+  String _valOrZero(String k) {
+    final s = _val(k).trim();
+    return s.isEmpty ? '0' : s; // si viene vacío, mostramos 0
+  }
 
   @override
   Widget build(BuildContext context) {
+    // Valores (texto o número del SQLite)
+    final detal      = _valOrZero('PrecioDetal');
+    final dolarDetal = _val('CostoDolar');   // dólar detal (opcional)
+    final mayor      = _valOrZero('PrecioMayor');
+    final dolarMayor = _val('DolarMayor');   // dólar mayor (opcional)
+    final promo      = _valOrZero('PrecioPromocion'); // siempre mostrar
+
+    bool _has(String s) =>
+        s.isNotEmpty && s != '0' && s != '0.0' && s != '0.00';
+
+    final detalLine = _has(dolarDetal)
+        ? 'Detal: $detal Bs - Dolar: $dolarDetal'
+        : 'Detal: $detal Bs';
+
+    final mayorLine = _has(dolarMayor)
+        ? 'Mayor: $mayor Bs - Dolar mayor: $dolarMayor'
+        : 'Mayor: $mayor Bs';
+
     return Card(
       elevation: 0.5,
       child: Padding(
@@ -194,9 +258,9 @@ class _ProductoCard extends StatelessWidget {
               spacing: 14,
               runSpacing: 6,
               children: [
-                Text('Detal: ${_val('PrecioDetal')}'),
-                Text('Mayor: ${_val('PrecioMayor')}'),
-                Text('Promo: ${_val('PrecioPromocion')}'),
+                Text(detalLine),
+                Text(mayorLine),
+                Text('Promo: $promo Bs'), // siempre se muestra (con 0 si aplica)
               ],
             ),
           ],
@@ -205,6 +269,8 @@ class _ProductoCard extends StatelessWidget {
     );
   }
 }
+
+
 
 class _StockTile extends StatelessWidget {
   final String tienda;

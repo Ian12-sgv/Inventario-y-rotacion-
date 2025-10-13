@@ -12,3 +12,13 @@ Monorepo con:
    cd back-end/Exporter
    dotnet build -c Release
    dotnet run   -c Release
+
+Test-Path .\appsettings.json      
+Get-Content .\appsettings.json | Write-Host      
+dotnet run -c Release
+
+3. front
+
+flutter clean                    
+flutter pub get
+flutter run -t lib/main.dart

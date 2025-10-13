@@ -35,7 +35,7 @@ class CsvImporter {
     );
 
     // índices (se asignan 1 sola vez al leer el header)
-    late final int iCodigo, iRef, iNombre, iPD, iPM, iPP, iExist, iTienda;
+    late final int iCodigo, iRef, iNombre, iPD, iPM, iPP, iExist, iTienda, iRegion, iCostoUsd, iCostoMayorUsd;
     bool mapped = false;
 
     // progreso total (opcional)
@@ -48,27 +48,10 @@ class CsvImporter {
     var done = 0;
 
     await db.transaction((txn) async {
-      // asegura esquema
-      await txn.execute('''
-        CREATE TABLE IF NOT EXISTS inventarioc (
-          CodigoBarra TEXT PRIMARY KEY,
-          Referencia  TEXT,
-          Nombre      TEXT,
-          PrecioDetal TEXT,
-          PrecioMayor TEXT,
-          PrecioPromocion TEXT,
-          CREACION    TEXT
-        );
-      ''');
-      await txn.execute('''
-        CREATE TABLE IF NOT EXISTS stock (
-          CodigoBarra TEXT,
-          Tienda      TEXT,
-          Existencia  INTEGER,
-          PRIMARY KEY (CodigoBarra, Tienda)
-        );
-      ''');
+      // ===== 1) Asegura ESQUEMA (CREATE/ALTER) =====
+      await _ensureSchemaV2(txn);
 
+      // Limpieza (siempre regeneras desde CSV completo)
       await txn.delete('inventarioc');
       await txn.delete('stock');
 
@@ -111,6 +94,21 @@ class CsvImporter {
             'PrecioPromocion','PrecioPromo','Precio_Promocion',
             'price_promo','promo_price','discount_price'
           ], required: false);
+
+          // NUEVO: costo/dólar detal (alias incluye CostoInicial->CostoDolar)
+          iCostoUsd = _colAny(headers, [
+            'CostoDolar','Costo_Dolar','CostoUSD','PrecioUSD','USD',
+            'CostoEnDolares','Dolares','DollarCost','usd_cost',
+            'Dolar','PrecioDolar','Precio_Dolar'
+          ], required: false);
+
+          // NUEVO: dólar mayor (alias de CAST(ROUND(c.CostoPromedio,2)) AS dolarMayor)
+          iCostoMayorUsd = _colAny(headers, [
+            'dolarMayor','DolarMayor','PrecioMayorUSD','CostoPromedio','Costo_Promedio',
+            'MayorUSD','CostoMayorDolar','Costo_Mayor_Dolar'
+          ], required: false);
+
+          // Existencia + tienda + región
           iExist = _colAny(headers, [
             'ExistenciaPorTienda','Existencia','Stock','ExistenciaTienda',
             'stock','qty','quantity'
@@ -119,6 +117,9 @@ class CsvImporter {
             'Tienda','NombreTienda','Sucursal','Almacen','Bodega','NombreSucursal',
             'store_name','store','branch','warehouse'
           ]);
+          iRegion = _colAny(headers, [
+            'Region','Zona','Area','region','zone'
+          ], required: false);
 
           mapped = true;
           isFirst = false;
@@ -141,21 +142,30 @@ class CsvImporter {
           continue;
         }
 
-        // Tabla inventarioc: solo 1 vez por producto
+        // ===== 2) inventarioc: 1 fila por producto =====
         if (seen.add(codigo)) {
-          batch.insert('inventarioc', {
-            'CodigoBarra': codigo,
-            'Referencia': _s(row, iRef),
-            'Nombre': _s(row, iNombre),
-            'PrecioDetal': _s(row, iPD),
-            'PrecioMayor': _s(row, iPM),
-            'PrecioPromocion': _s(row, iPP),
-            'CREACION': '',
-          });
+          final costoUsd = _d(row, iCostoUsd);               // 0.0 si no hay
+          final costoMayorUsd = _d(row, iCostoMayorUsd);     // 0.0 si no hay
+          batch.insert(
+            'inventarioc',
+            {
+              'CodigoBarra': codigo,
+              'Referencia': _s(row, iRef),
+              'Nombre': _s(row, iNombre),
+              'PrecioDetal': _s(row, iPD),
+              'PrecioMayor': _s(row, iPM),
+              'PrecioPromocion': _s(row, iPP),
+              'CostoDolar': costoUsd,        // dólar detal
+              'DolarMayor': costoMayorUsd,   // dólar mayor (nuevo)
+              'CREACION': '',
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
         }
 
-        // Tabla stock: por tienda
+        // ===== 3) stock: una fila por tienda (con Región) =====
         final tienda = _s(row, iTienda);
+        final region = _s(row, iRegion);
         final existencia = _i(row, iExist);
         if (tienda.isNotEmpty) {
           batch.insert(
@@ -163,6 +173,7 @@ class CsvImporter {
             {
               'CodigoBarra': codigo,
               'Tienda': tienda,
+              'Region': region,
               'Existencia': existencia,
             },
             conflictAlgorithm: ConflictAlgorithm.replace,
@@ -297,6 +308,51 @@ class CsvImporter {
     });
   }
 
+  // ======== ESQUEMA (CREATE/ALTER) ========
+
+  Future<void> _ensureSchemaV2(DatabaseExecutor txn) async {
+    // Crea tablas si no existen (ya incluyen las columnas nuevas)
+    await txn.execute('''
+      CREATE TABLE IF NOT EXISTS inventarioc (
+        CodigoBarra TEXT PRIMARY KEY,
+        Referencia  TEXT,
+        Nombre      TEXT,
+        PrecioDetal TEXT,
+        PrecioMayor TEXT,
+        PrecioPromocion TEXT,
+        CostoDolar  REAL DEFAULT 0,   -- dólar detal
+        DolarMayor  REAL DEFAULT 0,   -- dólar mayor (nuevo)
+        CREACION    TEXT
+      );
+    ''');
+
+    await txn.execute('''
+      CREATE TABLE IF NOT EXISTS stock (
+        CodigoBarra TEXT,
+        Tienda      TEXT,
+        Region      TEXT,
+        Existencia  INTEGER,
+        PRIMARY KEY (CodigoBarra, Tienda)
+      );
+    ''');
+
+    // Si las tablas ya existían sin estas columnas, ALTER TABLE.
+    if (!await _colExists(txn, 'inventarioc', 'CostoDolar')) {
+      await txn.execute("ALTER TABLE inventarioc ADD COLUMN CostoDolar REAL DEFAULT 0;");
+    }
+    if (!await _colExists(txn, 'inventarioc', 'DolarMayor')) {
+      await txn.execute("ALTER TABLE inventarioc ADD COLUMN DolarMayor REAL DEFAULT 0;");
+    }
+    if (!await _colExists(txn, 'stock', 'Region')) {
+      await txn.execute("ALTER TABLE stock ADD COLUMN Region TEXT;");
+    }
+  }
+
+  Future<bool> _colExists(DatabaseExecutor txn, String table, String col) async {
+    final info = await txn.rawQuery("PRAGMA table_info($table)");
+    return info.any((c) => (c['name'] as String?)?.toLowerCase() == col.toLowerCase());
+  }
+
   // ===== utils =====
 
   /// CSV-only: si llega .gz, falla explícito.
@@ -328,13 +384,21 @@ class CsvImporter {
     return v == null ? '' : v.toString();
   }
 
-  /// Acepta enteros con coma o punto; vacío → 0.
+  /// Enteros con coma o punto; vacío → 0.
   int _i(List row, int idx) {
     if (idx < 0 || idx >= row.length) return 0;
     final s = (row[idx]?.toString() ?? '').trim();
     if (s.isEmpty) return 0;
     final d = double.tryParse(s.replaceAll(',', '.'));
     return d?.round() ?? 0;
+  }
+
+  /// Decimales con coma o punto; vacío → 0.0
+  double _d(List row, int idx) {
+    if (idx < 0 || idx >= row.length) return 0.0;
+    final s = (row[idx]?.toString() ?? '').trim();
+    if (s.isEmpty) return 0.0;
+    return double.tryParse(s.replaceAll(',', '.')) ?? 0.0;
   }
 
   // Normaliza encabezados: quita BOM, tildes, separadores y pone minúsculas.

@@ -4,15 +4,15 @@
 $ErrorActionPreference = 'Stop'
 
 # Rutas de los proyectos (.csproj)
-$EXP_INV = 'D:\ian proyectos\aplicacion\back-end\Exporter'
-$EXP_COM = 'D:\ian proyectos\aplicacion\back-end\ExporterCompras'
+$EXP_INV = 'C:\Users\i510400\Documents\ian\perla\Inventario-y-rotacion-\back-end\Exporter'
+$EXP_COM = 'C:\Users\i510400\Documents\ian\perla\Inventario-y-rotacion-\back-end\ExporterCompras'
 
 # dotnet (ruta completa si PATH no está disponible en el Programador de tareas)
 $DOTNET = "$env:ProgramFiles\dotnet\dotnet.exe"
 if (-not (Test-Path $DOTNET)) { $DOTNET = 'dotnet' }
 
 # Carpeta de logs
-$LOGDIR = 'D:\ian proyectos\aplicacion\back-end\logs'
+$LOGDIR = 'C:\Users\i510400\Documents\ian\perla\Inventario-y-rotacion-\back-end\logs'
 New-Item -ItemType Directory -Force -Path $LOGDIR | Out-Null
 
 $ts = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'

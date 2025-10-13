@@ -37,7 +37,6 @@ public static class Program {
         var csvPath  = Path.Combine(outDir, outCfg.CsvName);
 
         var remoteDir   = TrimSlash(ftpCfg.RemoteDir);
-        var tmpRemote   = $"{remoteDir}/{outCfg.CsvName}.part";
         var finalRemote = $"{remoteDir}/{outCfg.CsvName}";
 
         try {
@@ -62,20 +61,16 @@ public static class Program {
             Log($"2.1) Asegurar directorio remoto: {remoteDir}");
             client.CreateDirectory(remoteDir);
 
-            Log($"2.2) Subiendo temporal: {tmpRemote}");
+            // Opción B: subir DIRECTO al archivo final (sin .part, sin rename)
+            Log($"2.2) Subiendo directo: {finalRemote}");
             var status = client.UploadFile(
                 localPath: csvPath,
-                remotePath: tmpRemote,
+                remotePath: finalRemote,
                 existsMode: FtpRemoteExists.Overwrite,
                 createRemoteDir: true
             );
             if (status != FtpStatus.Success && status != FtpStatus.Skipped)
                 throw new Exception($"Upload status inesperado: {status}");
-
-            Log("2.3) Rename atómico a destino final …");
-            if (client.FileExists(finalRemote))
-                client.DeleteFile(finalRemote);
-            client.Rename(tmpRemote, finalRemote);
 
             Log("OK ✅ Proceso completado (CSV)");
             client.Disconnect();
