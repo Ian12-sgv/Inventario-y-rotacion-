@@ -1,3 +1,4 @@
+// lib/screen/consultaprecio.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -15,10 +16,14 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
   final FocusNode _focusNode = FocusNode();
 
   Map<String, dynamic>? _producto;
-  // Lista plana (por compatibilidad si la necesitas luego)
+
+  // Lista completa (para decidir si hay datos)
   List<Map<String, dynamic>> _stock = [];
 
-  // Agrupado por región
+  // Casa Matriz (se muestra aparte)
+  List<Map<String, dynamic>> _stockCasaMatriz = [];
+
+  // Agrupado por región (solo TIENDAS, sin Casa Matriz)
   Map<String, List<Map<String, dynamic>>> _stockPorRegion = {};
   Map<String, int> _totalesPorRegion = {};
 
@@ -37,7 +42,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
     final Database db = await openDatabaseConnection();
 
-    // Producto (inventarioc): ahora incluye CostoDolar y DolarMayor
+    // Producto (inventarioc): incluye CostoDolar y DolarMayor
     final prod = await db.query(
       'inventarioc',
       where: 'CodigoBarra = ?',
@@ -45,7 +50,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
       limit: 1,
     );
 
-    // Stock dinámico (tienda / region / existencia)
+    // Stock dinámico
     final stk = await db.query(
       'stock',
       columns: ['Tienda', 'Region', 'Existencia'],
@@ -54,20 +59,32 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
       orderBy: 'Region COLLATE NOCASE ASC, Tienda COLLATE NOCASE ASC',
     );
 
-    // Totales y agrupación por región
+    // Totales y separación Casa Matriz vs Tiendas
     int total = 0;
     int totalCM = 0;
-    final Map<String, List<Map<String, dynamic>>> byRegion = {};
-    final Map<String, int> totalsRegion = {};
+    final List<Map<String, dynamic>> casaMatriz = [];
+    final List<Map<String, dynamic>> tiendas = [];
 
     for (final r in stk) {
-      final ex = (r['Existencia'] as int?) ?? 0;
-      final tienda = (r['Tienda'] as String?) ?? '';
-      final regionRaw = (r['Region'] as String?) ?? '';
-      final region = regionRaw.trim().isEmpty ? 'Sin región' : regionRaw.trim();
-
+      final ex = _asInt(r['Existencia']);
+      final tienda = _asString(r['Tienda']);
       total += ex;
-      if (_isCasaMatriz(tienda)) totalCM += ex;
+
+      if (_isCasaMatriz(tienda)) {
+        totalCM += ex;
+        casaMatriz.add(r);
+      } else {
+        tiendas.add(r);
+      }
+    }
+
+    // Agrupar SOLO tiendas por región
+    final Map<String, List<Map<String, dynamic>>> byRegion = {};
+    final Map<String, int> totalsRegion = {};
+    for (final r in tiendas) {
+      final ex = _asInt(r['Existencia']);
+      final regionRaw = _asString(r['Region']);
+      final region = regionRaw.isEmpty ? 'Sin región' : regionRaw;
 
       byRegion.putIfAbsent(region, () => []).add(r);
       totalsRegion.update(region, (old) => old + ex, ifAbsent: () => ex);
@@ -78,6 +95,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
     setState(() {
       _producto = prod.isNotEmpty ? prod.first : null;
       _stock = stk;
+      _stockCasaMatriz = casaMatriz;
       _stockPorRegion = byRegion;
       _totalesPorRegion = totalsRegion;
       _totalGeneral = total;
@@ -115,99 +133,263 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
     super.dispose();
   }
 
-  String _val(Map<String, dynamic> map, String k) => (map[k] ?? '').toString();
+  // ==== helpers de coerción seguros ====
+  int _asInt(dynamic v) {
+    if (v == null) return 0;
+    if (v is int) return v;
+    if (v is double) return v.round(); // o toInt() si prefieres truncar
+    return int.tryParse(v.toString()) ?? 0;
+  }
+
+  String _asString(dynamic v) => (v ?? '').toString().trim();
 
   @override
   Widget build(BuildContext context) {
     final p = _producto;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
 
     return Scaffold(
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            // Buscador
-            Container(
-              decoration: BoxDecoration(
-                color: Colors.white, borderRadius: BorderRadius.circular(12),
-                boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3))],
-              ),
-              child: TextField(
-                focusNode: _focusNode,
+      backgroundColor: cs.surface.withOpacity(0.98),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          physics: const BouncingScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Título + buscador
+              Text('Consulta de precios',
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.2,
+                  )),
+              const SizedBox(height: 10),
+              _SearchField(
                 controller: _searchController,
-                decoration: InputDecoration(
-                  labelText: 'Buscar código de barras',
-                  prefixIcon: IconButton(
-                    icon: const Icon(Icons.search),
-                    onPressed: () => _buscarRegistroPorCodigo(_searchController.text),
-                  ),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.qr_code_scanner),
-                    onPressed: _scanBarcode,
-                  ),
-                  border: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                ),
-                onSubmitted: (v) => _buscarRegistroPorCodigo(v),
+                focusNode: _focusNode,
+                onSearch: () => _buscarRegistroPorCodigo(_searchController.text),
+                onScan: _scanBarcode,
               ),
-            ),
-            const SizedBox(height: 20),
 
-            // Producto + precios
-            if (p != null) _ProductoCard(p),
+              const SizedBox(height: 18),
 
-            const SizedBox(height: 16),
+              // Producto + precios
+              if (p != null) _ProductoCard(p),
 
-            // Existencia agrupada por región
-            if (_stock.isNotEmpty)
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text('Existencia por región', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+
+              if (_stock.isNotEmpty) ...[
+                // ========== CASA MATRIZ (fuera del agrupado) ==========
+                if (_stockCasaMatriz.isNotEmpty) ...[
+                  const _SectionHeader(
+                    icon: Icons.home_filled,
+                    title: 'Casa Matriz',
+                  ),
                   const SizedBox(height: 8),
-
-                  ..._stockPorRegion.entries.map((e) {
-                    final region = e.key;
-                    final items = e.value;
-                    final totalRegion = _totalesPorRegion[region] ?? 0;
-
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.white, borderRadius: BorderRadius.circular(12),
-                        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 2))],
-                      ),
-                      child: ExpansionTile(
-                        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
-                        title: Text('$region — $totalRegion', style: const TextStyle(fontWeight: FontWeight.w700)),
-                        childrenPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        children: items.map((r) {
-                          final tienda = '${r['Tienda'] ?? ''}';
-                          final existencia = (r['Existencia'] as int?) ?? 0;
-                          final esCM = _isCasaMatriz(tienda);
-                          return _StockTile(
-                            tienda: tienda,
-                            existencia: existencia,
-                            isCasaMatriz: esCM,
-                          );
-                        }).toList(),
+                  ..._stockCasaMatriz.map((r) {
+                    final tienda = _asString(r['Tienda']);
+                    final existencia = _asInt(r['Existencia']);
+                    // Margen inferior pequeño solo para Casa Matriz
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _StockTile(
+                        tienda: tienda,
+                        existencia: existencia,
+                        isCasaMatriz: true,
                       ),
                     );
                   }),
-
                   const SizedBox(height: 12),
-
-                  // TOTALES
-                  _TotalTile(label: 'Total Casa Matriz', total: _totalCasaMatriz, color: Colors.indigo),
-                  const SizedBox(height: 8),
-                  _TotalTile(label: 'Total Tiendas', total: _totalTiendas, color: Colors.deepPurple),
-                  const SizedBox(height: 8),
-                  _TotalTile(label: 'Total General', total: _totalGeneral, color: Colors.teal),
                 ],
-              ),
-          ],
+
+                // ========== TIENDAS AGRUPADAS POR REGIÓN ==========
+                const _SectionHeader(
+                  icon: Icons.map_rounded,
+                  title: 'Existencia por región (tiendas)',
+                ),
+                const SizedBox(height: 8),
+
+                Theme(
+                  data: theme.copyWith(
+                    expansionTileTheme: ExpansionTileThemeData(
+                      backgroundColor: cs.surface,
+                      collapsedBackgroundColor: cs.surface,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      collapsedShape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+                      childrenPadding:
+                          const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    ),
+                  ),
+                  child: Column(
+                    children: _stockPorRegion.entries.map((e) {
+                      final region = e.key;
+                      final items = e.value;
+                      final totalRegion = _totalesPorRegion[region] ?? 0;
+
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Colors.black12,
+                              blurRadius: 6,
+                              offset: Offset(0, 2),
+                            )
+                          ],
+                        ),
+                        child: ExpansionTile(
+                          title: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  region,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                              _QtyPill(value: totalRegion),
+                            ],
+                          ),
+                          children: items.map((r) {
+                            final tienda = _asString(r['Tienda']);
+                            final existencia = _asInt(r['Existencia']);
+                            return _StockTile(
+                              tienda: tienda,
+                              existencia: existencia,
+                              isCasaMatriz: false,
+                            );
+                          }).toList(),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+
+                const SizedBox(height: 14),
+
+                // ========== TOTALES (mismo ancho que el resto) ==========
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _TotalTile(label: 'Total Casa Matriz', total: _totalCasaMatriz, color: Colors.indigo),
+                    const SizedBox(height: 10),
+                    _TotalTile(label: 'Total Tiendas', total: _totalTiendas, color: Colors.deepPurple),
+                    const SizedBox(height: 10),
+                    _TotalTile(label: 'Total General', total: _totalGeneral, color: Colors.teal),
+                  ],
+                ),
+              ],
+            ],
+          ),
         ),
       ),
+    );
+  }
+}
+
+class _SearchField extends StatelessWidget {
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final VoidCallback onSearch;
+  final Future<void> Function() onScan;
+
+  const _SearchField({
+    required this.controller,
+    required this.focusNode,
+    required this.onSearch,
+    required this.onScan,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3))],
+      ),
+      child: TextField(
+        focusNode: focusNode,
+        controller: controller,
+        textInputAction: TextInputAction.search,
+        onSubmitted: (_) => onSearch(),
+        decoration: InputDecoration(
+          hintText: 'Buscar código de barras',
+          hintStyle: const TextStyle(color: Colors.black45),
+          prefixIcon: IconButton(
+            icon: const Icon(Icons.search),
+            onPressed: onSearch,
+          ),
+          suffixIcon: IconButton(
+            icon: const Icon(Icons.qr_code_scanner),
+            onPressed: onScan,
+            tooltip: 'Escanear',
+          ),
+          filled: true,
+          fillColor: cs.surface,
+          border: OutlineInputBorder(
+            borderSide: BorderSide(color: cs.outlineVariant.withOpacity(0.4)),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderSide: BorderSide(color: cs.primary.withOpacity(0.6), width: 1.4),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderSide: BorderSide(color: cs.outlineVariant.withOpacity(0.3)),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  const _SectionHeader({required this.icon, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Row(
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: cs.primary.withOpacity(.1),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          padding: const EdgeInsets.all(8),
+          child: Icon(icon, color: cs.primary, size: 18),
+        ),
+        const SizedBox(width: 10),
+        Text(
+          title,
+          style: theme.textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w800,
+            letterSpacing: -0.2,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Divider(
+            thickness: 1,
+            color: cs.outlineVariant.withOpacity(0.4),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -224,7 +406,10 @@ class _ProductoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Valores (texto o número del SQLite)
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    // Valores
     final detal      = _valOrZero('PrecioDetal');
     final dolarDetal = _val('CostoDolar');   // dólar detal (opcional)
     final mayor      = _valOrZero('PrecioMayor');
@@ -242,25 +427,50 @@ class _ProductoCard extends StatelessWidget {
         ? 'Mayor: $mayor Bs - Dolar mayor: $dolarMayor'
         : 'Mayor: $mayor Bs';
 
-    return Card(
-      elevation: 0.5,
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3))],
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_val('Nombre'), style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 4),
-            Text('Código: ${_val('CodigoBarra')}'),
-            Text('Referencia: ${_val('Referencia')}'),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 14,
-              runSpacing: 6,
+            Text(
+              _val('Nombre'),
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.2,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Row(
               children: [
-                Text(detalLine),
-                Text(mayorLine),
-                Text('Promo: $promo Bs'), // siempre se muestra (con 0 si aplica)
+                const Icon(Icons.qr_code_2, size: 16, color: Colors.black45),
+                const SizedBox(width: 6),
+                Text('Código: ${_val('CodigoBarra')}', style: const TextStyle(color: Colors.black87)),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                const Icon(Icons.tag, size: 16, color: Colors.black45),
+                const SizedBox(width: 6),
+                Text('Referencia: ${_val('Referencia')}', style: const TextStyle(color: Colors.black87)),
+              ],
+            ),
+            const SizedBox(height: 10),
+
+            // Precios en “etiquetas” para mejor lectura
+            Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              children: [
+                _PricePill(text: detalLine),
+                _PricePill(text: mayorLine),
+                _PricePill(text: 'Promo: $promo Bs'),
               ],
             ),
           ],
@@ -270,7 +480,30 @@ class _ProductoCard extends StatelessWidget {
   }
 }
 
+class _PricePill extends StatelessWidget {
+  final String text;
+  const _PricePill({required this.text});
 
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: cs.primary.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: cs.primary.withOpacity(.15)),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: cs.onSurface,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
 
 class _StockTile extends StatelessWidget {
   final String tienda;
@@ -284,21 +517,54 @@ class _StockTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bg = isCasaMatriz ? Colors.amber.shade100 : Colors.grey.shade100;
+    final cs = Theme.of(context).colorScheme;
+    final bg = isCasaMatriz ? Colors.amber.shade100 : cs.surfaceVariant.withOpacity(.4);
     final icon = isCasaMatriz ? Icons.home_filled : Icons.storefront;
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-      decoration: BoxDecoration(
-        color: bg, borderRadius: BorderRadius.circular(10),
+
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(12),
+      child: ListTile(
+        dense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+        leading: CircleAvatar(
+          radius: 16,
+          backgroundColor: Colors.white,
+          child: Icon(icon, size: 18, color: Colors.black54),
+        ),
+        title: Text(
+          tienda,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+        trailing: _QtyPill(value: existencia),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
-      child: Row(
-        children: [
-          Icon(icon, size: 18, color: Colors.black54),
-          const SizedBox(width: 8),
-          Expanded(child: Text(tienda, style: const TextStyle(fontWeight: FontWeight.w600))),
-          Text('x$existencia', style: const TextStyle(fontSize: 16)),
-        ],
+    );
+  }
+}
+
+class _QtyPill extends StatelessWidget {
+  final int value;
+  const _QtyPill({required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: cs.primary.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        'x$value',
+        style: TextStyle(
+          color: cs.primary,
+          fontWeight: FontWeight.w800,
+          letterSpacing: .2,
+        ),
       ),
     );
   }
@@ -313,13 +579,27 @@ class _TotalTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
+      width: double.infinity, // ocupa todo el ancho como las demás cards
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [color.withOpacity(.95), color.withOpacity(.80)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 4))],
+      ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          Text('$total', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          Flexible(
+            child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+          Text('$total', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16)),
         ],
       ),
     );

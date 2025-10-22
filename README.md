@@ -22,3 +22,9 @@ dotnet run -c Release
 flutter clean                    
 flutter pub get
 flutter run -t lib/main.dart
+
+4. para crear el apk
+
+flutter pub get                  
+dart run flutter_launcher_icons
+flutter build apk --release  
