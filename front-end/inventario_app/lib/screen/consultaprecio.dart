@@ -6,7 +6,6 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:http/http.dart' as http;
 
 // ===== Config API =====
-// Puedes inyectar por --dart-define (recomendado) y dejar estos como fallback.
 const String kApiBase =
     String.fromEnvironment('API_BASE', defaultValue: 'https://api2.apipalacio.com');
 const String kApiKey =
@@ -24,13 +23,9 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
   Map<String, dynamic>? _producto;
 
-  // Lista completa (para decidir si hay datos)
+  // Datos de stock
   List<Map<String, dynamic>> _stock = [];
-
-  // Casa Matriz (se muestra aparte)
   List<Map<String, dynamic>> _stockCasaMatriz = [];
-
-  // Agrupado por región (solo TIENDAS, sin Casa Matriz)
   Map<String, List<Map<String, dynamic>>> _stockPorRegion = {};
   Map<String, int> _totalesPorRegion = {};
 
@@ -39,6 +34,9 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
   int _totalTiendas = 0;
 
   bool _loading = false;
+
+  // NUEVO: bandera para ocultar todo y mostrar solo el mensaje
+  bool _sinExistencia = false;
 
   bool _isCasaMatriz(String tienda) {
     final t = tienda.toLowerCase();
@@ -52,7 +50,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
     if (resp.statusCode == 200) {
       final data = jsonDecode(resp.body);
       if (data is List) {
-        // Filtra filas de totales (si el backend las incluye al final)
+        // Filtra filas de totales si vinieran en la respuesta
         return data
             .whereType<Map>()
             .cast<Map<String, dynamic>>()
@@ -66,10 +64,10 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
     }
 
     if (resp.statusCode == 404) {
-      return []; // no encontrado
+      return [];
     }
 
-    // Intenta leer ProblemDetails
+    // ProblemDetails opcional
     try {
       final p = jsonDecode(resp.body);
       final title = p['title'] ?? 'Error';
@@ -84,11 +82,16 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
     final code = codigoBarra.trim();
     if (code.isEmpty) return;
 
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _sinExistencia = false; // reset
+    });
+
     try {
       final rows = await _fetchProductoTodas(code);
 
       if (rows.isEmpty) {
+        // No existe el producto en la consulta
         setState(() {
           _producto = null;
           _stock = [];
@@ -98,6 +101,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
           _totalGeneral = 0;
           _totalCasaMatriz = 0;
           _totalTiendas = 0;
+          _sinExistencia = true; // mostramos la tarjeta de “sin existencia”
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -107,7 +111,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
         return;
       }
 
-      // La primera fila sirve como "cabecera" de producto
+      // Cabecera de producto
       final header = rows.first;
 
       // Separa Casa Matriz vs Tiendas y calcula totales
@@ -129,7 +133,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
         }
       }
 
-      // Agrupar solo tiendas por región
+      // Agrupar solo TIENDAS por región
       final Map<String, List<Map<String, dynamic>>> byRegion = {};
       final Map<String, int> totalsRegion = {};
       for (final r in tiendas) {
@@ -143,25 +147,41 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
       final totalTiendas = total - totalCM;
 
-      setState(() {
-        _producto = {
-          'CodigoBarra': header['CodigoBarra'],
-          'Referencia': header['Referencia'],
-          'Nombre': header['Nombre'],
-          'PrecioDetal': header['PrecioDetal'],
-          'CostoDolar': header['CostoDolar'],
-          'PrecioMayor': header['PrecioMayor'],
-          'DolarMayor': header['dolarMayor'], // ojo: backend la envía como 'dolarMayor'
-          'PrecioPromocion': header['PrecioPromocion'],
-        };
-        _stock = rows;
-        _stockCasaMatriz = casaMatriz;
-        _stockPorRegion = byRegion;
-        _totalesPorRegion = totalsRegion;
-        _totalGeneral = total;
-        _totalCasaMatriz = totalCM;
-        _totalTiendas = totalTiendas;
-      });
+      // Si NO hay existencias en ninguna parte → mostrar solo mensaje
+      if (total == 0) {
+        setState(() {
+          _producto = null; // no mostramos card de producto
+          _stock = [];
+          _stockCasaMatriz = [];
+          _stockPorRegion = {};
+          _totalesPorRegion = {};
+          _totalGeneral = 0;
+          _totalCasaMatriz = 0;
+          _totalTiendas = 0;
+          _sinExistencia = true;
+        });
+      } else {
+        setState(() {
+          _producto = {
+            'CodigoBarra': header['CodigoBarra'],
+            'Referencia': header['Referencia'],
+            'Nombre': header['Nombre'],
+            'PrecioDetal': header['PrecioDetal'],
+            'CostoDolar': header['CostoDolar'],
+            'PrecioMayor': header['PrecioMayor'],
+            'DolarMayor': header['dolarMayor'], // backend: 'dolarMayor'
+            'PrecioPromocion': header['PrecioPromocion'],
+          };
+          _stock = rows;
+          _stockCasaMatriz = casaMatriz;
+          _stockPorRegion = byRegion;
+          _totalesPorRegion = totalsRegion;
+          _totalGeneral = total;
+          _totalCasaMatriz = totalCM;
+          _totalTiendas = totalTiendas;
+          _sinExistencia = false;
+        });
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -241,70 +261,75 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
               const SizedBox(height: 18),
 
-              // Producto + precios
-              if (!_loading && p != null) _ProductoCard(p),
+              // SOLO mensaje cuando no hay existencias
+              if (!_loading && _sinExistencia) ...[
+                const _SinExistenciaCard(),
+              ]
+              // Producto + listas + totales cuando sí hay existencias
+              else ...[
+                if (p != null) _ProductoCard(p),
+                const SizedBox(height: 16),
 
-              const SizedBox(height: 16),
+                if (_stock.isNotEmpty) ...[
+                  // ========== CASA MATRIZ ==========
+                  if (_stockCasaMatriz.isNotEmpty) ...[
+                    const _SectionHeader(
+                      icon: Icons.home_filled,
+                      title: 'Casa Matriz',
+                    ),
+                    const SizedBox(height: 8),
+                    ..._stockCasaMatriz.map((r) {
+                      final tienda = _asString(r['Tienda']);
+                      final existencia = _asInt(r['Existencia']);
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: _StockTile(
+                          tienda: tienda,
+                          existencia: existencia,
+                          isCasaMatriz: true,
+                        ),
+                      );
+                    }),
+                    const SizedBox(height: 12),
+                  ],
 
-              if (!_loading && _stock.isNotEmpty) ...[
-                // ========== CASA MATRIZ (fuera del agrupado) ==========
-                if (_stockCasaMatriz.isNotEmpty) ...[
+                  // ========== TIENDAS POR REGIÓN ==========
                   const _SectionHeader(
-                    icon: Icons.home_filled,
-                    title: 'Casa Matriz',
+                    icon: Icons.map_rounded,
+                    title: 'Existencia por región (tiendas)',
                   ),
                   const SizedBox(height: 8),
-                  ..._stockCasaMatriz.map((r) {
-                    final tienda = _asString(r['Tienda']);
-                    final existencia = _asInt(r['Existencia']);
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: _StockTile(
-                        tienda: tienda,
-                        existencia: existencia,
-                        isCasaMatriz: true,
-                      ),
-                    );
-                  }),
-                  const SizedBox(height: 12),
+
+                  _RegionGroups(
+                    stockPorRegion: _stockPorRegion,
+                    totalesPorRegion: _totalesPorRegion,
+                    asInt: _asInt,
+                    asString: _asString,
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  // ========== TOTALES ==========
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _TotalTile(
+                          label: 'Total Casa Matriz',
+                          total: _totalCasaMatriz,
+                          color: Colors.indigo),
+                      const SizedBox(height: 10),
+                      _TotalTile(
+                          label: 'Total Tiendas',
+                          total: _totalTiendas,
+                          color: Colors.deepPurple),
+                      const SizedBox(height: 10),
+                      _TotalTile(
+                          label: 'Total General',
+                          total: _totalGeneral,
+                          color: Colors.teal),
+                    ],
+                  ),
                 ],
-
-                // ========== TIENDAS AGRUPADAS POR REGIÓN ==========
-                const _SectionHeader(
-                  icon: Icons.map_rounded,
-                  title: 'Existencia por región (tiendas)',
-                ),
-                const SizedBox(height: 8),
-
-                _RegionGroups(
-                  stockPorRegion: _stockPorRegion,
-                  totalesPorRegion: _totalesPorRegion,
-                  asInt: _asInt,
-                  asString: _asString,
-                ),
-
-                const SizedBox(height: 14),
-
-                // ========== TOTALES ==========
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _TotalTile(
-                        label: 'Total Casa Matriz',
-                        total: _totalCasaMatriz,
-                        color: Colors.indigo),
-                    const SizedBox(height: 10),
-                    _TotalTile(
-                        label: 'Total Tiendas',
-                        total: _totalTiendas,
-                        color: Colors.deepPurple),
-                    const SizedBox(height: 10),
-                    _TotalTile(
-                        label: 'Total General',
-                        total: _totalGeneral,
-                        color: Colors.teal),
-                  ],
-                ),
               ],
             ],
           ),
@@ -707,6 +732,36 @@ class _TotalTile extends StatelessWidget {
           Text('$total',
               style: const TextStyle(
                   color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16)),
+        ],
+      ),
+    );
+  }
+}
+
+// Mensaje cuando no hay existencias en ninguna parte
+class _SinExistenciaCard extends StatelessWidget {
+  const _SinExistenciaCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
+      ),
+      child: Row(
+        children: const [
+          Icon(Icons.info_outline),
+          SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'Sin existencia en ninguna sucursal ni Casa Matriz ni con status 1.',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
         ],
       ),
     );

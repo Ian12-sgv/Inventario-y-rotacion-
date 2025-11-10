@@ -77,7 +77,8 @@ app.MapGet("/api/productos/{codigo}", async (string codigo) =>
     {
         var sql = WrapWithWhere(sqlText, column: "CodigoBarra", opAndParam: "= @codigo");
         var rows = await QueryAsDictsAsync(connStr, sql, new SqlParameter("@codigo", codigo));
-        return rows.Count == 0 ? Results.NotFound() : Results.Ok(rows[0]);
+        return rows.Count == 0 ? Results.NotFound() : Results.Ok(rows);
+
     }
     catch (Exception ex)
     {
