@@ -1,144 +1,188 @@
-﻿using System;
+﻿// Program.cs (ExporterCompras)
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Globalization;
 using System.IO;
 using System.Text;
-using System.Threading.Tasks;
-using System.Globalization;
-using FluentFTP;
 using Microsoft.Data.SqlClient;
-using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.Builder; // WebApplication
+using Microsoft.AspNetCore.Http;    // Results, StatusCodes
 
-#region Config POCOs
-public sealed class SqlConfig { public string ConnectionString { get; init; } = ""; }
-public sealed class FtpConfig {
-    public string Host { get; init; } = "";
-    public int Port { get; init; } = 21;
-    public string User { get; init; } = "";
-    public string Pass { get; init; } = "";
-    public string RemoteDir { get; init; } = "/exports";
-    public bool UseFtpes { get; init; } = true;
-}
-public sealed class OutputConfig {
-    public string Directory { get; init; } = "out";
-    public string CsvName { get; init; } = "compras.csv";
-}
-public sealed class QueryConfig { public string SqlText { get; init; } = ""; }
-#endregion
+// ===== Build =====
+var builder = WebApplication.CreateBuilder(args);
 
-public static class Program {
-    public static async Task<int> Main() {
-        var cfg    = BuildConfig();
-        var sql    = cfg.GetRequiredSection("Sql").Get<SqlConfig>()!;
-        var ftpCfg = cfg.GetRequiredSection("Ftp").Get<FtpConfig>()!;
-        var outCfg = cfg.GetRequiredSection("Output").Get<OutputConfig>()!;
-        var qry    = cfg.GetRequiredSection("Query").Get<QueryConfig>()!;
+// Carga de configuración (appsettings.json + variables de entorno)
+builder.Configuration
+    .SetBasePath(Directory.GetCurrentDirectory())
+    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+    .AddEnvironmentVariables();
 
-        var outDir   = Path.GetFullPath(outCfg.Directory);
-        Directory.CreateDirectory(outDir);
-        var csvPath  = Path.Combine(outDir, outCfg.CsvName);
+var cfg     = builder.Configuration;
+var apiKey  = cfg["ApiKey"] ?? throw new InvalidOperationException("Falta ApiKey en appsettings.json");
+var sqlCfg  = cfg.GetRequiredSection("Sql").Get<SqlConfig>()!;
+var qryCfg  = cfg.GetRequiredSection("Query").Get<QueryConfig>()!;
+var connStr = sqlCfg.ConnectionString;
+var sqlText = qryCfg.SqlText;
 
-        var remoteDir   = TrimSlash(ftpCfg.RemoteDir);
-        var tmpRemote   = $"{remoteDir}/{outCfg.CsvName}.part";
-        var finalRemote = $"{remoteDir}/{outCfg.CsvName}";
+var app = builder.Build();
 
-        try {
-            Log("=== ExporterCompras (CSV plano) ===");
-
-            Log("1) SQL → CSV …");
-            await ExportCsvAsync(sql.ConnectionString, qry.SqlText, csvPath);
-
-            Log($"2) FTP conectar {(ftpCfg.UseFtpes ? "(FTPS explícito)" : "(FTP plano)")} …");
-            using var client = new FtpClient(ftpCfg.Host, ftpCfg.User, ftpCfg.Pass, ftpCfg.Port) {
-                Config = {
-                    EncryptionMode         = ftpCfg.UseFtpes ? FtpEncryptionMode.Explicit : FtpEncryptionMode.None,
-                    ValidateAnyCertificate = ftpCfg.UseFtpes,
-                    DataConnectionType     = FtpDataConnectionType.AutoPassive,
-                    ReadTimeout            = 30000,
-                    ConnectTimeout         = 15000
-                }
-            };
-
-            client.Connect();
-
-            Log($"2.1) Asegurar directorio remoto: {remoteDir}");
-            client.CreateDirectory(remoteDir);
-
-            Log($"2.2) Subiendo temporal: {tmpRemote}");
-            var status = client.UploadFile(
-                localPath: csvPath,
-                remotePath: tmpRemote,
-                existsMode: FtpRemoteExists.Overwrite,
-                createRemoteDir: true
-            );
-            if (status != FtpStatus.Success && status != FtpStatus.Skipped)
-                throw new Exception($"Upload status inesperado: {status}");
-
-            Log("2.3) Rename atómico a destino final …");
-            if (client.FileExists(finalRemote))
-                client.DeleteFile(finalRemote);
-            client.Rename(tmpRemote, finalRemote);
-
-            Log("OK ✅ Proceso completado (CSV)");
-            client.Disconnect();
-            return 0;
-        } catch (Exception ex) {
-            Log($"ERROR ❌ {ex.GetType().Name}: {ex.Message}");
-            Log(ex.StackTrace ?? "");
-            return 1;
+// ===== Auth por API-Key (solo /api/*) =====
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/api"))
+    {
+        var key = ctx.Request.Headers["x-api-key"].ToString();
+        if (!string.Equals(key, apiKey, StringComparison.Ordinal))
+        {
+            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await ctx.Response.WriteAsJsonAsync(new { error = "invalid_api_key" });
+            return;
         }
     }
+    await next();
+});
 
-    #region Helpers
-    private static IConfiguration BuildConfig() =>
-        new ConfigurationBuilder()
-            .SetBasePath(Directory.GetCurrentDirectory())
-            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
-            .AddEnvironmentVariables()
-            .Build();
+// ===== Endpoints =====
+app.MapGet("/api/ping", () => Results.Ok(new { ok = true }));
+app.MapGet("/healthz", () => Results.Ok(new { ok = true }));
 
-    private static string TrimSlash(string s) => string.IsNullOrWhiteSpace(s) ? "" : s.Replace('\\', '/').TrimEnd('/');
+// SELECT completo → JSON (o CSV con ?format=csv)
+app.MapGet("/api/inventario", async (HttpContext http) =>
+{
+    try
+    {
+        string format = http.Request.Query["format"];
+        if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
+        {
+            var bytes = await ExportCsvAsync(connStr, sqlText);
+            return Results.File(bytes, "text/csv; charset=utf-8", "inventario.csv");
+        }
+        else
+        {
+            var rows = await QueryAsDictsAsync(connStr, sqlText);
+            return Results.Ok(rows);
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(title: "Inventario falló", detail: ex.Message, statusCode: 500);
+    }
+});
 
-    private static void Log(string msg) => Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}");
+// Buscar por código de barras SIN ambigüedad (quitamos ORDER BY y filtramos sobre src.)
+app.MapGet("/api/productos/{codigo}", async (string codigo) =>
+{
+    try
+    {
+        var sql = WrapWithWhere(sqlText, column: "CodigoBarra", opAndParam: "= @codigo");
+        var rows = await QueryAsDictsAsync(connStr, sql, new SqlParameter("@codigo", codigo));
+        return rows.Count == 0 ? Results.NotFound() : Results.Ok(rows[0]);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(title: "Consulta de producto falló", detail: ex.Message, statusCode: 500);
+    }
+});
 
-    private static async Task ExportCsvAsync(string connStr, string sql, string csvPath) {
-        await using var conn = new SqlConnection(connStr);
-        await conn.OpenAsync();
+app.Run();
 
-        await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
-        await using var rdr = await cmd.ExecuteReaderAsync();
+// ===== Helpers =====
+static async Task<List<Dictionary<string, object?>>> QueryAsDictsAsync(string connStr, string sql, params SqlParameter[]? parameters)
+{
+    using var conn = new SqlConnection(connStr);
+    await conn.OpenAsync();
 
-        await using var fs = new FileStream(csvPath, FileMode.Create, FileAccess.Write, FileShare.None);
-        await using var sw = new StreamWriter(fs, new UTF8Encoding(false)) { NewLine = "\n" };
+    using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
+    if (parameters is { Length: > 0 }) cmd.Parameters.AddRange(parameters);
 
-        // Encabezados
-        for (int i = 0; i < rdr.FieldCount; i++) {
+    using var rdr = await cmd.ExecuteReaderAsync();
+    var result = new List<Dictionary<string, object?>>(512);
+
+    var names = new string[rdr.FieldCount];
+    for (int i = 0; i < rdr.FieldCount; i++) names[i] = rdr.GetName(i);
+
+    while (await rdr.ReadAsync())
+    {
+        var row = new Dictionary<string, object?>(rdr.FieldCount, StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < rdr.FieldCount; i++)
+            row[names[i]] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+        result.Add(row);
+    }
+    return result;
+}
+
+static async Task<byte[]> ExportCsvAsync(string connStr, string sql)
+{
+    using var conn = new SqlConnection(connStr);
+    await conn.OpenAsync();
+
+    using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
+    using var rdr = await cmd.ExecuteReaderAsync();
+
+    using var ms = new MemoryStream();
+    using var sw = new StreamWriter(ms, new UTF8Encoding(false)) { NewLine = "\n" };
+
+    // Encabezados
+    for (int i = 0; i < rdr.FieldCount; i++)
+    {
+        if (i > 0) await sw.WriteAsync(',');
+        await sw.WriteAsync(rdr.GetName(i));
+    }
+    await sw.WriteLineAsync();
+
+    // Filas
+    while (await rdr.ReadAsync())
+    {
+        for (int i = 0; i < rdr.FieldCount; i++)
+        {
             if (i > 0) await sw.WriteAsync(',');
-            await sw.WriteAsync(rdr.GetName(i));
+            var cell = FormatValue(rdr.IsDBNull(i) ? null : rdr.GetValue(i));
+            await sw.WriteAsync(CsvEscape(cell));
         }
         await sw.WriteLineAsync();
-
-        // Filas
-        while (await rdr.ReadAsync()) {
-            for (int i = 0; i < rdr.FieldCount; i++) {
-                if (i > 0) await sw.WriteAsync(',');
-                var cell = FormatValue(rdr.GetValue(i));
-                await sw.WriteAsync(CsvEscape(cell));
-            }
-            await sw.WriteLineAsync();
-        }
-        await sw.FlushAsync();
     }
 
-    private static string FormatValue(object? v) {
-        if (v is null || v is DBNull) return "";
-        return v switch {
-            IFormattable f => f.ToString(null, CultureInfo.InvariantCulture) ?? "",
-            _ => v.ToString() ?? ""
-        };
-    }
+    await sw.FlushAsync();
+    return ms.ToArray();
 
-    private static string CsvEscape(string s) {
-        bool needsQuotes = s.Contains(',') || s.Contains('"') || s.Contains('\n') || s.Contains('\r');
-        return needsQuotes ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
-    }
-    #endregion
+    static string FormatValue(object? v) =>
+        v is null ? "" :
+        v is IFormattable f ? f.ToString(null, CultureInfo.InvariantCulture) ?? "" :
+        v.ToString() ?? "";
+
+    static string CsvEscape(string s) =>
+        (s.Contains(',') || s.Contains('"') || s.Contains('\n') || s.Contains('\r'))
+        ? "\"" + s.Replace("\"", "\"\"") + "\""
+        : s;
 }
+
+// --- Quitar ORDER BY y envolver para filtrar sobre src.<col> ---
+static string WrapWithWhere(string originalSql, string column, string opAndParam, string? outerOrderBy = null)
+{
+    var baseNoOrder = StripOrderBy(originalSql);
+    var wrapped = $"SELECT * FROM ({baseNoOrder}) AS src WHERE src.{column} {opAndParam}";
+    if (!string.IsNullOrWhiteSpace(outerOrderBy))
+        wrapped += " " + outerOrderBy.Trim();
+    return wrapped;
+}
+
+static string StripOrderBy(string sql)
+{
+    var s = sql.Trim().TrimEnd(';');
+    var idx = LastIndexOfOrdinalIgnoreCase(s, "ORDER BY");
+    if (idx < 0) return s;
+    return s[..idx].TrimEnd();
+}
+
+static int LastIndexOfOrdinalIgnoreCase(string source, string value)
+{
+    for (int i = source.Length - value.Length; i >= 0; i--)
+        if (string.Compare(source, i, value, 0, value.Length, true, CultureInfo.InvariantCulture) == 0)
+            return i;
+    return -1;
+}
+
+// ===== Config =====
+public sealed class SqlConfig { public string ConnectionString { get; init; } = ""; }
+public sealed class QueryConfig { public string SqlText { get; init; } = ""; }

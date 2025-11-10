@@ -1,11 +1,13 @@
 // lib/main.dart
 import 'package:flutter/material.dart';
 
-import 'screen/actualizardatos.dart';
 import 'screen/consultacompra.dart';
 import 'screen/consultaprecio.dart';
 
-void main() => runApp(const MyApp());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const MyApp());
+}
 
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
@@ -19,27 +21,35 @@ class _MyAppState extends State<MyApp> {
   // Preserva el estado de cada pestaña (scroll/inputs)
   final PageStorageBucket _bucket = PageStorageBucket();
 
-  // Páginas (con claves para PageStorage)
+  // Páginas con claves para PageStorage (solo 2 tabs)
   final List<Widget> _paginas = const [
-    ScreenConsulta(key: PageStorageKey<String>('consulta')),
-    ScreenCompras(key: PageStorageKey<String>('compras')),
-    ScreenActualizarDatos(key: PageStorageKey<String>('actualizar')),
+    ScreenConsulta(key: PageStorageKey('consulta')),
+    ScreenCompras(key: PageStorageKey('compras')),
   ];
 
   @override
   Widget build(BuildContext context) {
+    final scheme = ColorScheme.fromSeed(
+      seedColor: Colors.blue,
+      brightness: Brightness.light,
+    );
+
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Madutex Consulta',
       theme: ThemeData(
         useMaterial3: true,
-        colorSchemeSeed: Colors.blue,
-        brightness: Brightness.light,
-        textTheme: const TextTheme(bodyMedium: TextStyle(color: Colors.black)),
+        colorScheme: scheme,
+        textTheme: const TextTheme(
+          bodyMedium: TextStyle(color: Colors.black),
+        ),
       ),
       home: Scaffold(
         appBar: AppBar(
-          title: const Text('Blumer', style: TextStyle(fontWeight: FontWeight.bold)),
+          title: const Text(
+            'Blumer',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
           backgroundColor: const Color.fromARGB(255, 240, 240, 240),
           elevation: 0,
         ),
@@ -62,9 +72,16 @@ class _MyAppState extends State<MyApp> {
       backgroundColor: Colors.white,
       elevation: 8,
       items: [
-        _buildBottomNavItem(icon: Icons.search, label: 'Existencia', isSelected: _paginaActual == 0),
-        _buildBottomNavItem(icon: Icons.shopping_cart, label: 'Compras', isSelected: _paginaActual == 1),
-        _buildBottomNavItem(icon: Icons.update, label: 'Actualizar', isSelected: _paginaActual == 2),
+        _buildBottomNavItem(
+          icon: Icons.search,
+          label: 'Existencia',
+          isSelected: _paginaActual == 0,
+        ),
+        _buildBottomNavItem(
+          icon: Icons.shopping_cart,
+          label: 'Compras',
+          isSelected: _paginaActual == 1,
+        ),
       ],
     );
   }

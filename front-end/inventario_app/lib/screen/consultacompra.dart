@@ -1,9 +1,15 @@
+// lib/screen/consultacompra.dart
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:http/http.dart' as http;
 
-import '../database.dart'; // usa la conexión central (no recrea tablas aquí)
+// ===== Config de API (se puede sobreescribir con --dart-define) =====
+const String kComprasApiBase =
+    String.fromEnvironment('COMPRAS_API_BASE', defaultValue: 'https://api3.apipalacio.com');
+const String kApiKey =
+    String.fromEnvironment('API_KEY', defaultValue: 'k9mWIm4Nd3j9KomxkT28cBqJY4eYeWm58X+Fmp1Kq0g=');
 
 class ScreenCompras extends StatefulWidget {
   const ScreenCompras({super.key});
@@ -14,33 +20,77 @@ class ScreenCompras extends StatefulWidget {
 
 class _ScreenComprasState extends State<ScreenCompras> {
   final TextEditingController _searchController = TextEditingController();
+  bool _loading = false;
+
   List<Map<String, dynamic>> _registros = [];
   int _totalCantidad = 0;
+
+  Future<List<Map<String, dynamic>>> _fetchComprasPorCodigo(String codigo) async {
+    final uri = Uri.parse('$kComprasApiBase/api/productos/$codigo');
+    final resp = await http.get(uri, headers: {'x-api-key': kApiKey});
+
+    if (resp.statusCode == 200) {
+      final body = jsonDecode(resp.body);
+      // El backend podría devolver una LISTA (ideal) o un OBJETO (fila única).
+      if (body is List) {
+        return body.whereType<Map>().cast<Map<String, dynamic>>().toList();
+      } else if (body is Map<String, dynamic>) {
+        return [body];
+      } else {
+        throw Exception('Respuesta inesperada del servidor.');
+      }
+    }
+
+    if (resp.statusCode == 404) {
+      return []; // no encontrado
+    }
+
+    // Intenta leer problem+json
+    try {
+      final p = jsonDecode(resp.body);
+      final title = p['title'] ?? 'Error';
+      final detail = p['detail'] ?? 'Fallo en la solicitud.';
+      throw Exception('$title: $detail');
+    } catch (_) {
+      throw Exception('HTTP ${resp.statusCode}: ${resp.reasonPhrase}');
+    }
+  }
 
   Future<void> _buscarRegistrosPorCodigo(String codigoBarra) async {
     final code = codigoBarra.trim();
     if (code.isEmpty) return;
 
-    final Database db = await openDatabaseConnection();
+    setState(() => _loading = true);
+    try {
+      final result = await _fetchComprasPorCodigo(code);
 
-    final result = await db.query(
-      'comprasgalpones',
-      where: 'CodigoBarra = ?',
-      whereArgs: [code],
-      orderBy: 'FechaCompra DESC, Documento ASC',
-    );
+      // Ordena (si vienen varios): FechaCompra DESC, Documento ASC
+      result.sort((a, b) {
+        int byFecha = _compareFechaDesc(a['FechaCompra'], b['FechaCompra']);
+        if (byFecha != 0) return byFecha;
+        return _asString(a['Documento']).compareTo(_asString(b['Documento']));
+      });
 
-    final total = result.fold<int>(
-      0,
-      (sum, r) => sum + (r['Cantidad'] is int ? r['Cantidad'] as int : int.tryParse('${r['Cantidad']}') ?? 0),
-    );
+      final total = result.fold<int>(
+        0,
+        (sum, r) => sum + _asInt(r['Cantidad']),
+      );
 
-    setState(() {
-      _registros = result;
-      _totalCantidad = total;
-    });
-
-    _searchController.clear();
+      setState(() {
+        _registros = result;
+        _totalCantidad = total;
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _loading = false);
+        _searchController.clear();
+      }
+    }
   }
 
   // Escaneo con mobile_scanner
@@ -62,70 +112,113 @@ class _ScreenComprasState extends State<ScreenCompras> {
     super.dispose();
   }
 
+  // ===== Helpers =====
+  int _asInt(dynamic v) {
+    if (v == null) return 0;
+    if (v is int) return v;
+    if (v is double) return v.round();
+    if (v is num) return v.toInt();
+    return int.tryParse(v.toString()) ?? 0;
+  }
+
+  String _asString(dynamic v) => (v ?? '').toString().trim();
+
+  int _compareFechaDesc(dynamic a, dynamic b) {
+    final sa = _asString(a);
+    final sb = _asString(b);
+    final da = DateTime.tryParse(sa);
+    final db = DateTime.tryParse(sb);
+    if (da == null && db == null) return 0;
+    if (da == null) return 1; // nulos van después
+    if (db == null) return -1;
+    return db.compareTo(da); // DESC
+  }
+
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
     return Scaffold(
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                border: Border.all(color: Colors.grey.shade300),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: TextField(
-                controller: _searchController,
-                decoration: InputDecoration(
-                  labelText: 'Buscar código de barras',
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  border: InputBorder.none,
-                  suffixIcon: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.search),
-                        onPressed: () => _buscarRegistrosPorCodigo(_searchController.text),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.qr_code_scanner),
-                        onPressed: _scanBarcode,
-                      ),
-                    ],
+      backgroundColor: cs.surface.withOpacity(0.98),
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Buscador
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: cs.surface,
+                  border: Border.all(color: cs.outlineVariant.withOpacity(.3)),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3))
+                  ],
+                ),
+                child: TextField(
+                  controller: _searchController,
+                  textInputAction: TextInputAction.search,
+                  onSubmitted: (v) => _buscarRegistrosPorCodigo(v),
+                  decoration: InputDecoration(
+                    hintText: 'Buscar código de barras',
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    border: InputBorder.none,
+                    suffixIcon: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.search),
+                          onPressed: () => _buscarRegistrosPorCodigo(_searchController.text),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.qr_code_scanner),
+                          onPressed: _scanBarcode,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-                onSubmitted: (v) => _buscarRegistrosPorCodigo(v),
-              ),
-            ),
-          ),
-
-          // Resumen
-          if (_registros.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                children: [
-                  Text('Resultados: ${_registros.length}', style: const TextStyle(fontWeight: FontWeight.w600)),
-                  const Spacer(),
-                  Text('Total Cant.: $_totalCantidad', style: const TextStyle(fontWeight: FontWeight.w600)),
-                ],
               ),
             ),
 
-          const SizedBox(height: 8),
+            if (_loading) const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: CircularProgressIndicator(),
+            ),
 
-          Expanded(child: _buildListaDeResultados()),
-        ],
+            // Resumen
+            if (!_loading && _registros.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    Text('Resultados: ${_registros.length}',
+                        style: const TextStyle(fontWeight: FontWeight.w600)),
+                    const Spacer(),
+                    Text('Total Cant.: $_totalCantidad',
+                        style: const TextStyle(fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
+
+            const SizedBox(height: 8),
+
+            Expanded(child: _buildListaDeResultados(cs)),
+          ],
+        ),
       ),
     );
   }
 
   // UI: lista de resultados
-  Widget _buildListaDeResultados() {
+  Widget _buildListaDeResultados(ColorScheme cs) {
+    if (_loading) {
+      return const SizedBox.shrink();
+    }
     if (_registros.isEmpty) {
       return const Center(
-        child: Text('No se encontraron resultados.', style: TextStyle(fontSize: 16, color: Colors.grey)),
+        child: Text('No se encontraron resultados.',
+            style: TextStyle(fontSize: 16, color: Colors.grey)),
       );
     }
 
@@ -133,9 +226,9 @@ class _ScreenComprasState extends State<ScreenCompras> {
       itemCount: _registros.length,
       itemBuilder: (context, index) {
         final r = _registros[index];
-        final doc = '${r['Documento'] ?? ''}';
-        final cant = r['Cantidad'] is int ? r['Cantidad'] as int : int.tryParse('${r['Cantidad']}') ?? 0;
-        final fecha = '${r['FechaCompra'] ?? ''}';
+        final doc = _asString(r['Documento']);
+        final cant = _asInt(r['Cantidad']);
+        final fecha = _asString(r['FechaCompra']);
 
         return Card(
           elevation: 0.5,
@@ -148,9 +241,9 @@ class _ScreenComprasState extends State<ScreenCompras> {
               children: [
                 _buildRegistroCabecera('Grupo Palacios', doc),
                 const Divider(),
-                _buildRegistroDetalle(Icons.qr_code, 'Código', '${r['CodigoBarra'] ?? ''}'),
-                _buildRegistroDetalle(Icons.article, 'Referencia', '${r['Referencia'] ?? ''}'),
-                _buildRegistroDetalle(Icons.label, 'Nombre', '${r['Nombre'] ?? ''}'),
+                _buildRegistroDetalle(Icons.qr_code, 'Código', _asString(r['CodigoBarra'])),
+                _buildRegistroDetalle(Icons.article, 'Referencia', _asString(r['Referencia'])),
+                _buildRegistroDetalle(Icons.label, 'Nombre', _asString(r['Nombre'])),
                 _buildRegistroDetalle(Icons.shopping_cart, 'Cantidad', '$cant'),
                 _buildRegistroDetalle(Icons.date_range, 'Fecha Compra', fecha),
               ],
@@ -165,8 +258,12 @@ class _ScreenComprasState extends State<ScreenCompras> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(galpon, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF646464))),
-        Text('Doc: $documento', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey)),
+        Text(galpon,
+            style:
+                const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF646464))),
+        Text('Doc: $documento',
+            style:
+                const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey)),
       ],
     );
   }
@@ -178,7 +275,8 @@ class _ScreenComprasState extends State<ScreenCompras> {
         children: [
           Icon(icon, size: 20, color: Colors.blueGrey),
           const SizedBox(width: 10),
-          Text('$label:', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: Colors.grey)),
+          Text('$label:',
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: Colors.grey)),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
@@ -238,8 +336,14 @@ class _ScanPageState extends State<ScanPage> {
       appBar: AppBar(
         title: const Text('Escanear código'),
         actions: [
-          IconButton(icon: const Icon(Icons.cameraswitch), onPressed: () => controller.switchCamera(), tooltip: 'Cambiar cámara'),
-          IconButton(icon: const Icon(Icons.flash_on), onPressed: () => controller.toggleTorch(), tooltip: 'Linterna'),
+          IconButton(
+              icon: const Icon(Icons.cameraswitch),
+              onPressed: () => controller.switchCamera(),
+              tooltip: 'Cambiar cámara'),
+          IconButton(
+              icon: const Icon(Icons.flash_on),
+              onPressed: () => controller.toggleTorch(),
+              tooltip: 'Linterna'),
         ],
       ),
       body: Stack(

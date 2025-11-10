@@ -1,0 +1,7 @@
+{ 
+"Sql": { "ConnectionString": "Server=SERVERDOS\\SERVERSQL_DOS;Database=BODEGA_DATOS;User Id=sa;Password=j2094l,.;TrustServerCertificate=True" }, 
+"Ftp": { "Host": "ftp.textilesyessica.com", 
+"Port": 21, "User": "Reportes@textilesyessica.com", 
+"Pass": "j305317909", "RemoteDir": "/exports", "UseFtpes": false }, 
+"Output": { "Directory": "out", "CsvName": "inventario.csv" }, 
+"Query": { "SqlText": "SELECT i.CodigoBarra AS CodigoBarra, i.Nombre AS Nombre, i.Referencia AS Referencia, CAST(ROUND(c.PrecioDetal, 2) AS DECIMAL(18,2)) AS PrecioDetal, CAST(ROUND(c.CostoInicial, 2) AS DECIMAL(18,2)) AS CostoDolar, CAST(ROUND(c.PrecioMayor, 2) AS DECIMAL(18,2)) AS PrecioMayor, CAST(ROUND(c.CostoDolar, 2) AS DECIMAL(18,2)) AS dolarMayor, CAST(ROUND(c.PrecioPromocion, 2) AS DECIMAL(18,2)) AS PrecioPromocion, t.Nombre AS Tienda, t.Zona AS Region, CASE WHEN h.Existencia < 0 THEN 0 ELSE h.Existencia END AS Existencia,t.Status FROM dbo.tbHecInventario AS h INNER JOIN dbo.tbDimInventario AS i ON i.dimID_Inventario = h.dimid_inventario INNER JOIN dbo.tbDimTiendas AS t ON t.dimid_tienda = h.dimid_tienda INNER JOIN [J101010100_999911].[dbo].[Inventario] AS c ON c.CodigoBarra = i.CodigoBarra WHERE t.Nombre COLLATE Latin1_General_CI_AI NOT LIKE '%creacion%' and t.Status = 1 ORDER BY i.Nombre, t.Nombre;" } }

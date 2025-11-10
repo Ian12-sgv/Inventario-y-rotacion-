@@ -1,0 +1,20 @@
+{
+  "Sql": {
+    "ConnectionString": "Server=SERVERDOS\\SERVERSQL_DOS;Database=J101010100_999911;User Id=sa;Password=j2094l,.;TrustServerCertificate=True"
+  },
+  "Ftp": {
+    "Host": "ftp.textilesyessica.com",
+    "Port": 21,
+    "User": "Reportes@textilesyessica.com",
+    "Pass": "j305317909",
+    "RemoteDir": "/exports",
+    "UseFtpes": false
+  },
+  "Output": {
+    "Directory": "out",
+    "CsvName": "compras.csv"
+  },
+  "Query": {
+    "SqlText": "SELECT mc.CodigoBarra, i.Referencia, i.Nombre AS Nombre, c.Documento, mc.Cantidad, CONVERT(date, c.Fecha) AS FechaCompra FROM dbo.MOVCOMPRAS AS mc INNER JOIN dbo.COMPRAS    AS c ON c.Documento   = mc.Documento INNER JOIN dbo.INVENTARIO AS i ON i.CodigoBarra = mc.CodigoBarra ORDER BY c.Fecha DESC, c.Documento;"
+  }
+}

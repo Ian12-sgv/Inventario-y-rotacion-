@@ -1,8 +1,8 @@
-// lib/screen/actualizardatos.dart
+/* lib/screen/actualizardatos.dart
 import 'dart:io';
 import 'package:flutter/material.dart';
 
-import '../ftp_service.dart';
+import '../api_service.dart';
 import '../database.dart';
 import '../import_csv.dart';
 
@@ -199,4 +199,4 @@ class _ScreenActualizarDatosState extends State<ScreenActualizarDatos> {
       ),
     );
   }
-}
+}*/

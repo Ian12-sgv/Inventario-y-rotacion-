@@ -28,3 +28,23 @@ flutter run -t lib/main.dart
 flutter pub get                  
 dart run flutter_launcher_icons
 flutter build apk --release  
+
+https
+reiniciar y correr de nuevo
+
+# Ver si está escuchando
+netstat -ano | findstr :5100
+
+# (si está corriendo) Apaga el servicio
+nssm stop ExporterApi   # o: sc stop ExporterApi
+
+# Verifica que ya liberó el puerto
+netstat -ano | findstr :5100
+
+# Ahora sí, corre en consola
+dotnet run
+Cuando termines, vuelve a dejar el servicio en producción:
+
+powershell
+Copiar código
+nssm start ExporterApi
