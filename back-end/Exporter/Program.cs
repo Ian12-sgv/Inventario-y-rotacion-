@@ -1,716 +1,393 @@
-﻿// lib/screen/consultaprecio.dart
-import 'dart:async';
-import 'package:flutter/material.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:sqflite/sqflite.dart';
-import '../database.dart';
+﻿// Program.cs
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Text;
+using Microsoft.Data.SqlClient;
+using Microsoft.AspNetCore.Builder; // WebApplication
+using Microsoft.AspNetCore.Http;    // Results, StatusCodes
 
-class ScreenConsulta extends StatefulWidget {
-  const ScreenConsulta({super.key});
-  @override
-  State<ScreenConsulta> createState() => _ScreenConsultaState();
+// ===== Build =====
+var builder = WebApplication.CreateBuilder(args);
+
+// Carga de configuración (appsettings.json + variables de entorno)
+builder.Configuration
+    .SetBasePath(Directory.GetCurrentDirectory())
+    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+    .AddEnvironmentVariables();
+
+var cfg     = builder.Configuration;
+var apiKey  = cfg["ApiKey"] ?? throw new InvalidOperationException("Falta ApiKey en appsettings.json");
+var sqlCfg  = cfg.GetRequiredSection("Sql").Get<SqlConfig>()!;
+var qryCfg  = cfg.GetRequiredSection("Query").Get<QueryConfig>()!;
+var connStr = sqlCfg.ConnectionString;
+var sqlText = qryCfg.SqlText;
+
+var app = builder.Build();
+
+// ===== Auth por API-Key (solo /api/*) =====
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/api"))
+    {
+        var key = ctx.Request.Headers["x-api-key"].ToString();
+        if (!string.Equals(key, apiKey, StringComparison.Ordinal))
+        {
+            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await ctx.Response.WriteAsJsonAsync(new { error = "invalid_api_key" });
+            return;
+        }
+    }
+    await next();
+});
+
+// ===== Endpoints =====
+app.MapGet("/api/ping", () => Results.Ok(new { ok = true }));
+
+// Health público (sin API key)
+app.MapGet("/healthz", () => Results.Ok(new { ok = true }));
+
+// SELECT completo → JSON (o CSV con ?format=csv)
+app.MapGet("/api/inventario", async (HttpContext http) =>
+{
+    try
+    {
+        string format = http.Request.Query["format"];
+        if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
+        {
+            var bytes = await ExportCsvAsync(connStr, sqlText);
+            return Results.File(bytes, "text/csv; charset=utf-8", "inventario.csv");
+        }
+        else
+        {
+            var rows = await QueryAsDictsAsync(connStr, sqlText);
+            AjustarPrecioDetal(rows); // 1.16 y redondeo
+            return Results.Ok(rows);
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(title: "Inventario falló", detail: ex.Message, statusCode: 500);
+    }
+});
+
+// 1) Una sola fila (primera coincidencia por Código de barras)
+app.MapGet("/api/productos/{codigo}", async (string codigo) =>
+{
+    try
+    {
+        var sql  = WrapWithWhere(sqlText, "CodigoBarra", "= @codigo", outerOrderBy: "ORDER BY src.Tienda, src.Region");
+        var rows = await QueryAsDictsAsync(connStr, sql, new SqlParameter("@codigo", codigo));
+        AjustarPrecioDetal(rows); // 1.16 y redondeo
+        return rows.Count == 0 ? Results.NotFound() : Results.Ok(rows[0]);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(title: "Consulta de producto falló", detail: ex.Message, statusCode: 500);
+    }
+});
+
+// 2) Todas las sucursales + 3 totales al final
+app.MapGet("/api/productos/{codigo}/todas", async (string codigo) =>
+{
+    try
+    {
+        var sql  = WrapWithWhere(sqlText, "CodigoBarra", "= @codigo", outerOrderBy: "ORDER BY src.Tienda, src.Region");
+        var rows = await QueryAsDictsAsync(connStr, sql, new SqlParameter("@codigo", codigo));
+        AjustarPrecioDetal(rows); // 1.16 y redondeo
+        if (rows.Count == 0) return Results.NotFound();
+
+        // Sumar existencias separando Casa Matriz vs Tiendas
+        decimal sumMatriz = 0m, sumTiendas = 0m;
+        foreach (var r in rows)
+        {
+            r.TryGetValue("Existencia", out var exObj);
+            r.TryGetValue("Tienda", out var tiendaObj);
+            var ex = ToDecimal(exObj);
+            var esMatriz = EsCasaMatriz(tiendaObj?.ToString());
+            if (esMatriz) sumMatriz += ex; else sumTiendas += ex;
+        }
+        var total = sumMatriz + sumTiendas;
+
+        // Si no hay existencia en ningún lado → devolver una sola fila "SIN EXISTENCIA"
+        if (total == 0m)
+        {
+            var header = rows[0];
+            var sin = CabeceraProducto(header);
+            sin["Tienda"]     = "SIN EXISTENCIA";
+            sin["Region"]     = "—";
+            sin["Existencia"] = 0m;
+            return Results.Ok(new[] { sin });
+        }
+
+        // Cabecera de producto para los totales
+        var headerOk = rows[0];
+        var totMatriz  = CabeceraProducto(headerOk);
+        var totTiendas = CabeceraProducto(headerOk);
+        var totGeneral = CabeceraProducto(headerOk);
+
+        totMatriz["Tienda"]     = "TOTAL CASA MATRIZ";
+        totMatriz["Region"]     = "—";
+        totMatriz["Existencia"] = sumMatriz;
+
+        totTiendas["Tienda"]     = "TOTAL TIENDAS";
+        totTiendas["Region"]     = "—";
+        totTiendas["Existencia"] = sumTiendas;
+
+        totGeneral["Tienda"]     = "TOTAL GENERAL";
+        totGeneral["Region"]     = "—";
+        totGeneral["Existencia"] = total;
+
+        var outList = new List<Dictionary<string, object?>>(rows.Count + 3);
+        outList.AddRange(rows);
+        outList.Add(totMatriz);
+        outList.Add(totTiendas);
+        outList.Add(totGeneral);
+
+        return Results.Ok(outList);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(title: "Consulta de sucursales falló", detail: ex.Message, statusCode: 500);
+    }
+});
+
+// 3) Resumen — SOLO TOTALES (con flag si no hay stock)
+app.MapGet("/api/productos/{codigo}/resumen", async (string codigo) =>
+{
+    try
+    {
+        var sql  = WrapWithWhere(sqlText, "CodigoBarra", "= @codigo", outerOrderBy: "ORDER BY src.Tienda, src.Region");
+        var rows = await QueryAsDictsAsync(connStr, sql, new SqlParameter("@codigo", codigo));
+        if (rows.Count == 0) return Results.NotFound();
+
+        decimal sumMatriz = 0m, sumTiendas = 0m;
+        foreach (var r in rows)
+        {
+            var ex = ToDecimal(Get(r, "Existencia"));
+            var esMatriz = EsCasaMatriz(Get(r, "Tienda")?.ToString());
+            if (esMatriz) sumMatriz += ex; else sumTiendas += ex;
+        }
+        var total = sumMatriz + sumTiendas;
+
+        var totales = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["casaMatriz"] = sumMatriz,
+            ["tiendas"]    = sumTiendas,
+            ["general"]    = total
+        };
+
+        if (total == 0m)
+        {
+            return Results.Ok(new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["sinExistencia"] = true,
+                ["mensaje"]       = "Producto sin ninguna existencia",
+                ["totales"]       = totales
+            });
+        }
+
+        return Results.Ok(totales);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(title: "Resumen falló", detail: ex.Message, statusCode: 500);
+    }
+});
+
+app.Run();
+
+// ===== Helpers =====
+static async Task<List<Dictionary<string, object?>>> QueryAsDictsAsync(string connStr, string sql, params SqlParameter[]? parameters)
+{
+    using var conn = new SqlConnection(connStr);
+    await conn.OpenAsync();
+
+    using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
+    if (parameters is { Length: > 0 }) cmd.Parameters.AddRange(parameters);
+
+    using var rdr = await cmd.ExecuteReaderAsync();
+    var result = new List<Dictionary<string, object?>>(512);
+
+    var names = new string[rdr.FieldCount];
+    for (int i = 0; i < rdr.FieldCount; i++) names[i] = rdr.GetName(i);
+
+    while (await rdr.ReadAsync())
+    {
+        var row = new Dictionary<string, object?>(rdr.FieldCount, StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < rdr.FieldCount; i++)
+            row[names[i]] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+        result.Add(row);
+    }
+    return result;
 }
 
-class _ScreenConsultaState extends State<ScreenConsulta> {
-  final TextEditingController _searchController = TextEditingController();
-  final FocusNode _focusNode = FocusNode();
+// Multiplica PrecioDetal por 1.16 y redondea a 2 decimales (AwayFromZero) para endpoints JSON
+static void AjustarPrecioDetal(List<Dictionary<string, object?>> rows)
+{
+    foreach (var r in rows)
+    {
+        if (r.TryGetValue("PrecioDetal", out var v) && v is not null && v is not DBNull)
+        {
+            var valor = ToDecimal(v) * 1.16m;
+            r["PrecioDetal"] = RedondearMoneda(valor);
+        }
+    }
+}
 
-  Map<String, dynamic>? _producto;
+// Redondeo de moneda a 2 decimales con AwayFromZero (típico de importes)
+static decimal RedondearMoneda(decimal v) =>
+    Math.Round(v, 2, MidpointRounding.AwayFromZero);
 
-  // Datos de stock
-  List<Map<String, dynamic>> _stock = [];
-  List<Map<String, dynamic>> _stockCasaMatriz = [];
-  Map<String, List<Map<String, dynamic>>> _stockPorRegion = {};
-  Map<String, int> _totalesPorRegion = {};
+static async Task<byte[]> ExportCsvAsync(string connStr, string sql)
+{
+    using var conn = new SqlConnection(connStr);
+    await conn.OpenAsync();
 
-  int _totalGeneral = 0;
-  int _totalCasaMatriz = 0;
-  int _totalTiendas = 0;
+    using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
+    using var rdr = await cmd.ExecuteReaderAsync();
 
-  // NUEVO: bandera para ocultar todo y mostrar mensaje
-  bool _sinExistencia = false;
+    using var ms = new MemoryStream();
+    using var sw = new StreamWriter(ms, new UTF8Encoding(false)) { NewLine = "\n" };
 
-  bool _isCasaMatriz(String tienda) {
-    final t = (tienda).toLowerCase();
-    return RegExp(r'\bcasa\s*matriz\b', caseSensitive: false).hasMatch(t);
-  }
+    // Encabezados
+    for (int i = 0; i < rdr.FieldCount; i++)
+    {
+        if (i > 0) await sw.WriteAsync(',');
+        await sw.WriteAsync(rdr.GetName(i));
+    }
+    await sw.WriteLineAsync();
 
-  Future<void> _buscarRegistroPorCodigo(String codigoBarra) async {
-    final code = codigoBarra.trim();
-    if (code.isEmpty) return;
-
-    final Database db = await openDatabaseConnection();
-
-    // Producto (inventarioc): incluye CostoDolar y DolarMayor
-    final prod = await db.query(
-      'inventarioc',
-      where: 'CodigoBarra = ?',
-      whereArgs: [code],
-      limit: 1,
-    );
-
-    // Stock dinámico
-    final stk = await db.query(
-      'stock',
-      columns: ['Tienda', 'Region', 'Existencia'],
-      where: 'CodigoBarra = ?',
-      whereArgs: [code],
-      orderBy: 'Region COLLATE NOCASE ASC, Tienda COLLATE NOCASE ASC',
-    );
-
-    // Totales y separación Casa Matriz vs Tiendas
-    int total = 0;
-    int totalCM = 0;
-    final List<Map<String, dynamic>> casaMatriz = [];
-    final List<Map<String, dynamic>> tiendas = [];
-
-    for (final r in stk) {
-      final ex = _asInt(r['Existencia']);
-      final tienda = _asString(r['Tienda']);
-      total += ex;
-
-      if (_isCasaMatriz(tienda)) {
-        totalCM += ex;
-        casaMatriz.add({
-          'Tienda': tienda,
-          'Region': _asString(r['Region']),
-          'Existencia': ex,
-        });
-      } else {
-        tiendas.add({
-          'Tienda': tienda,
-          'Region': _asString(r['Region']),
-          'Existencia': ex,
-        });
-      }
+    // Detectar índice de la columna PrecioDetal (case-insensitive)
+    int idxPrecioDetal = -1;
+    for (int i = 0; i < rdr.FieldCount; i++)
+    {
+        if (string.Equals(rdr.GetName(i), "PrecioDetal", StringComparison.OrdinalIgnoreCase))
+        {
+            idxPrecioDetal = i;
+            break;
+        }
     }
 
-    // Agrupar SOLO tiendas por región
-    final Map<String, List<Map<String, dynamic>>> byRegion = {};
-    final Map<String, int> totalsRegion = {};
-    for (final r in tiendas) {
-      final ex = _asInt(r['Existencia']);
-      final regionRaw = _asString(r['Region']);
-      final region = regionRaw.isEmpty ? 'Sin región' : regionRaw;
+    // Filas
+    while (await rdr.ReadAsync())
+    {
+        for (int i = 0; i < rdr.FieldCount; i++)
+        {
+            if (i > 0) await sw.WriteAsync(',');
 
-      byRegion.putIfAbsent(region, () => []).add(r);
-      totalsRegion.update(region, (old) => old + ex, ifAbsent: () => ex);
+            object? raw = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+            if (i == idxPrecioDetal && raw is not null)
+            {
+                var valor = ToDecimal(raw) * 1.16m;
+                raw = RedondearMoneda(valor); // redondeo en CSV
+            }
+
+            var cell = FormatValue(raw);
+            await sw.WriteAsync(CsvEscape(cell));
+        }
+        await sw.WriteLineAsync();
     }
 
-    final totalOtras = total - totalCM;
-    final sinExist = total == 0;
+    await sw.FlushAsync();
+    return ms.ToArray();
 
-    setState(() {
-      _producto = prod.isNotEmpty ? prod.first : null;
-      _sinExistencia = sinExist;
+    static string FormatValue(object? v) =>
+        v is null ? "" :
+        v is IFormattable f ? f.ToString(null, CultureInfo.InvariantCulture) ?? "" :
+        v.ToString() ?? "";
 
-      if (sinExist) {
-        // Vaciar todo para no renderizar listas
-        _stock = [];
-        _stockCasaMatriz = [];
-        _stockPorRegion = {};
-        _totalesPorRegion = {};
-        _totalGeneral = 0;
-        _totalCasaMatriz = 0;
-        _totalTiendas = 0;
-      } else {
-        _stock = stk;
-        _stockCasaMatriz = casaMatriz;
-        _stockPorRegion = byRegion;
-        _totalesPorRegion = totalsRegion;
-        _totalGeneral = total;
-        _totalCasaMatriz = totalCM;
-        _totalTiendas = totalOtras;
-      }
-    });
+    static string CsvEscape(string s) =>
+        (s.Contains(',') || s.Contains('"') || s.Contains('\n') || s.Contains('\r'))
+        ? "\"" + s.Replace("\"", "\"\"") + "\""
+        : s;
+}
 
-    _searchController.clear();
-    _focusNode.requestFocus();
+// Quita el último ORDER BY (para permitir envolver en subconsulta)
+static string StripOrderBy(string sql)
+{
+    var s = sql.TrimEnd().TrimEnd(';');
+    var idx = LastIndexOfOrdinalIgnoreCase(s, "ORDER BY");
+    if (idx < 0) return s;
+    return s[..idx].TrimEnd();
+}
 
-    if (_producto == null && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Código no encontrado')),
-      );
+static int LastIndexOfOrdinalIgnoreCase(string source, string value)
+{
+    for (int i = source.Length - value.Length; i >= 0; i--)
+    {
+        if (string.Compare(source, i, value, 0, value.Length, true, CultureInfo.InvariantCulture) == 0)
+            return i;
     }
-  }
-
-  // Scan con mobile_scanner
-  Future<void> _scanBarcode() async {
-    try {
-      final scanned = await Navigator.push<String>(
-        context,
-        MaterialPageRoute(builder: (_) => const ScanPage()),
-      );
-      if (scanned != null && scanned.isNotEmpty) {
-        await _buscarRegistroPorCodigo(scanned);
-      }
-    } catch (_) {}
-  }
-
-  @override
-  void dispose() {
-    _searchController.dispose();
-    _focusNode.dispose();
-    super.dispose();
-  }
-
-  // ==== helpers de coerción seguros ====
-  int _asInt(dynamic v) {
-    if (v == null) return 0;
-    if (v is int) return v;
-    if (v is double) return v.round();
-    return int.tryParse(v.toString()) ?? 0;
-  }
-
-  String _asString(dynamic v) => (v ?? '').toString().trim();
-
-  @override
-  Widget build(BuildContext context) {
-    final p = _producto;
-    final theme = Theme.of(context);
-    final cs = theme.colorScheme;
-
-    return Scaffold(
-      backgroundColor: cs.surface.withOpacity(0.98),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          physics: const BouncingScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Título + buscador
-              Text('Consulta de precios',
-                  style: theme.textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: -0.2,
-                  )),
-              const SizedBox(height: 10),
-              _SearchField(
-                controller: _searchController,
-                focusNode: _focusNode,
-                onSearch: () => _buscarRegistroPorCodigo(_searchController.text),
-                onScan: _scanBarcode,
-              ),
-
-              const SizedBox(height: 18),
-
-              // Producto + precios
-              if (p != null) _ProductoCard(p),
-
-              const SizedBox(height: 16),
-
-              // NUEVO: si no hay existencia, mostrar solo el mensaje y salir
-              if (_sinExistencia) ...[
-                _SinExistenciaCard(),
-              ] else if (_stock.isNotEmpty) ...[
-                // ========== CASA MATRIZ ==========
-                if (_stockCasaMatriz.isNotEmpty) ...[
-                  const _SectionHeader(
-                    icon: Icons.home_filled,
-                    title: 'Casa Matriz',
-                  ),
-                  const SizedBox(height: 8),
-                  ..._stockCasaMatriz.map((r) {
-                    final tienda = _asString(r['Tienda']);
-                    final existencia = _asInt(r['Existencia']);
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: _StockTile(
-                        tienda: tienda,
-                        existencia: existencia,
-                        isCasaMatriz: true,
-                      ),
-                    );
-                  }),
-                  const SizedBox(height: 12),
-                ],
-
-                // ========== TIENDAS POR REGIÓN ==========
-                const _SectionHeader(
-                  icon: Icons.map_rounded,
-                  title: 'Existencia por región (tiendas)',
-                ),
-                const SizedBox(height: 8),
-
-                Theme(
-                  data: theme.copyWith(
-                    expansionTileTheme: ExpansionTileThemeData(
-                      backgroundColor: cs.surface,
-                      collapsedBackgroundColor: cs.surface,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      collapsedShape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      tilePadding: const EdgeInsets.symmetric(horizontal: 12),
-                      childrenPadding:
-                          const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    ),
-                  ),
-                  child: Column(
-                    children: _stockPorRegion.entries.map((e) {
-                      final region = e.key;
-                      final items = e.value;
-                      final totalRegion = _totalesPorRegion[region] ?? 0;
-
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(12),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Colors.black12,
-                              blurRadius: 6,
-                              offset: Offset(0, 2),
-                            )
-                          ],
-                        ),
-                        child: ExpansionTile(
-                          title: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  region,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ),
-                              _QtyPill(value: totalRegion),
-                            ],
-                          ),
-                          children: items.map((r) {
-                            final tienda = _asString(r['Tienda']);
-                            final existencia = _asInt(r['Existencia']);
-                            return _StockTile(
-                              tienda: tienda,
-                              existencia: existencia,
-                              isCasaMatriz: false,
-                            );
-                          }).toList(),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                ),
-
-                const SizedBox(height: 14),
-
-                // ========== TOTALES ==========
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _TotalTile(label: 'Total Casa Matriz', total: _totalCasaMatriz, color: Colors.indigo),
-                    const SizedBox(height: 10),
-                    _TotalTile(label: 'Total Tiendas', total: _totalTiendas, color: Colors.deepPurple),
-                    const SizedBox(height: 10),
-                    _TotalTile(label: 'Total General', total: _totalGeneral, color: Colors.teal),
-                  ],
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+    return -1;
 }
 
-class _SearchField extends StatelessWidget {
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final VoidCallback onSearch;
-  final Future<void> Function() onScan;
-
-  const _SearchField({
-    required this.controller,
-    required this.focusNode,
-    required this.onSearch,
-    required this.onScan,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      decoration: BoxDecoration(
-        color: cs.surface,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3))],
-      ),
-      child: TextField(
-        focusNode: focusNode,
-        controller: controller,
-        textInputAction: TextInputAction.search,
-        onSubmitted: (_) => onSearch(),
-        decoration: InputDecoration(
-          hintText: 'Buscar código de barras',
-          hintStyle: const TextStyle(color: Colors.black45),
-          prefixIcon: IconButton(
-            icon: const Icon(Icons.search),
-            onPressed: onSearch,
-          ),
-          suffixIcon: IconButton(
-            icon: const Icon(Icons.qr_code_scanner),
-            onPressed: onScan,
-            tooltip: 'Escanear',
-          ),
-          filled: true,
-          fillColor: cs.surface,
-          border: OutlineInputBorder(
-            borderSide: BorderSide(color: cs.outlineVariant.withOpacity(0.4)),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderSide: BorderSide(color: cs.primary.withOpacity(0.6), width: 1.4),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderSide: BorderSide(color: cs.outlineVariant.withOpacity(0.3)),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-        ),
-      ),
-    );
-  }
+// Envuelve el SQL base (sin ORDER BY) y aplica WHERE + ORDER BY externo opcional
+static string WrapWithWhere(string originalSql, string column, string opAndParam, string? outerOrderBy = null)
+{
+    var baseNoOrder = StripOrderBy(originalSql);
+    var wrapped = $"SELECT * FROM ({baseNoOrder}) AS src WHERE src.{column} {opAndParam}";
+    if (!string.IsNullOrWhiteSpace(outerOrderBy))
+        wrapped += " " + outerOrderBy.Trim();
+    return wrapped;
 }
 
-class _SectionHeader extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  const _SectionHeader({required this.icon, required this.title});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final cs = theme.colorScheme;
-    return Row(
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: cs.primary.withOpacity(.1),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          padding: const EdgeInsets.all(8),
-          child: Icon(icon, color: cs.primary, size: 18),
-        ),
-        const SizedBox(width: 10),
-        Text(
-          title,
-          style: theme.textTheme.titleMedium?.copyWith(
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.2,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Divider(
-            thickness: 1,
-            color: cs.outlineVariant.withOpacity(0.4),
-          ),
-        ),
-      ],
-    );
-  }
+// Helpers de tipos/valores
+static object? Get(Dictionary<string, object?> dict, string key)
+{
+    dict.TryGetValue(key, out var v);
+    return v;
 }
 
-class _ProductoCard extends StatelessWidget {
-  final Map<String, dynamic> p;
-  const _ProductoCard(this.p);
-
-  String _val(String k) => (p[k] ?? '').toString();
-  String _valOrZero(String k) {
-    final s = _val(k).trim();
-    return s.isEmpty ? '0' : s;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final cs = theme.colorScheme;
-
-    final detal      = _valOrZero('PrecioDetal');
-    final dolarDetal = _val('CostoDolar');   // opcional
-    final mayor      = _valOrZero('PrecioMayor');
-    final dolarMayor = _val('DolarMayor');   // opcional
-    final promo      = _valOrZero('PrecioPromocion');
-
-    bool _has(String s) => s.isNotEmpty && s != '0' && s != '0.0' && s != '0.00';
-
-    final detalLine = _has(dolarDetal)
-        ? 'Detal: $detal Bs - Dolar: $dolarDetal'
-        : 'Detal: $detal Bs';
-
-    final mayorLine = _has(dolarMayor)
-        ? 'Mayor: $mayor Bs - Dolar mayor: $dolarMayor'
-        : 'Mayor: $mayor Bs';
-
-    return Container(
-      decoration: BoxDecoration(
-        color: cs.surface,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3))],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              _val('Nombre'),
-              style: theme.textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w800,
-                letterSpacing: -0.2,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Row(
-              children: [
-                const Icon(Icons.qr_code_2, size: 16, color: Colors.black45),
-                const SizedBox(width: 6),
-                Text('Código: ${_val('CodigoBarra')}', style: const TextStyle(color: Colors.black87)),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                const Icon(Icons.tag, size: 16, color: Colors.black45),
-                const SizedBox(width: 6),
-                Text('Referencia: ${_val('Referencia')}', style: const TextStyle(color: Colors.black87)),
-              ],
-            ),
-            const SizedBox(height: 10),
-
-            Wrap(
-              spacing: 10,
-              runSpacing: 8,
-              children: [
-                _PricePill(text: detalLine),
-                _PricePill(text: mayorLine),
-                _PricePill(text: 'Promo: $promo Bs'),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+static decimal ToDecimal(object? v)
+{
+    if (v is null || v is DBNull) return 0m;
+    try
+    {
+        return v switch
+        {
+            decimal d => d,
+            double  d => (decimal)d,
+            float   f => (decimal)f,
+            int     i => i,
+            long    l => l,
+            string  s => decimal.Parse(s, NumberStyles.Any, CultureInfo.InvariantCulture),
+            IConvertible c => Convert.ToDecimal(c, CultureInfo.InvariantCulture),
+            _ => 0m
+        };
+    }
+    catch { return 0m; }
 }
 
-class _PricePill extends StatelessWidget {
-  final String text;
-  const _PricePill({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: cs.primary.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: cs.primary.withOpacity(.15)),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          color: cs.onSurface,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
+static bool EsCasaMatriz(string? tienda)
+{
+    if (string.IsNullOrWhiteSpace(tienda)) return false;
+    var t = tienda.ToLowerInvariant();
+    // Ajusta según tus nombres reales de matriz
+    return t.Contains("matriz") || t.Contains("casa matriz") || t.Contains("principal") || t.Contains("central");
 }
 
-class _StockTile extends StatelessWidget {
-  final String tienda;
-  final int existencia;
-  final bool isCasaMatriz;
-  const _StockTile({
-    required this.tienda,
-    required this.existencia,
-    this.isCasaMatriz = false,
-  });
+// Fila "cabecera" para totales (repite datos del producto)
+static Dictionary<string, object?> CabeceraProducto(Dictionary<string, object?> src) =>
+    new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["CodigoBarra"]     = Get(src, "CodigoBarra"),
+        ["Nombre"]          = Get(src, "Nombre"),
+        ["Referencia"]      = Get(src, "Referencia"),
+        ["PrecioDetal"]     = Get(src, "PrecioDetal"),
+        ["CostoDolar"]      = Get(src, "CostoDolar"),
+        ["PrecioMayor"]     = Get(src, "PrecioMayor"),
+        ["dolarMayor"]      = Get(src, "dolarMayor"),
+        ["PrecioPromocion"] = Get(src, "PrecioPromocion"),
+        ["Tienda"]          = null,
+        ["Region"]          = null,
+        ["Existencia"]      = 0m,
+        ["Status"]          = null
+    };
 
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final bg = isCasaMatriz ? Colors.amber.shade100 : cs.surfaceVariant.withOpacity(.4);
-    final icon = isCasaMatriz ? Icons.home_filled : Icons.storefront;
-
-    return Material(
-      color: bg,
-      borderRadius: BorderRadius.circular(12),
-      child: ListTile(
-        dense: true,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-        leading: CircleAvatar(
-          radius: 16,
-          backgroundColor: Colors.white,
-          child: Icon(icon, size: 18, color: Colors.black54),
-        ),
-        title: Text(
-          tienda,
-          style: const TextStyle(fontWeight: FontWeight.w700),
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
-        trailing: _QtyPill(value: existencia),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
-    );
-  }
-}
-
-class _QtyPill extends StatelessWidget {
-  final int value;
-  const _QtyPill({required this.value});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: cs.primary.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        'x$value',
-        style: TextStyle(
-          color: cs.primary,
-          fontWeight: FontWeight.w800,
-          letterSpacing: .2,
-        ),
-      ),
-    );
-  }
-}
-
-class _TotalTile extends StatelessWidget {
-  final String label;
-  final int total;
-  final Color color;
-  const _TotalTile({required this.label, required this.total, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [color.withOpacity(.95), color.withOpacity(.80)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 4))],
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Flexible(
-            child: Text(label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          ),
-          Text('$total', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16)),
-        ],
-      ),
-    );
-  }
-}
-
-// Tarjeta compacta para "sin existencia"
-class _SinExistenciaCard extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: cs.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.info_outline, color: cs.primary),
-          const SizedBox(width: 12),
-          const Expanded(
-            child: Text(
-              'Sin existencia en ninguna sucursal ni Casa Matriz ni con status 1.',
-              style: TextStyle(fontWeight: FontWeight.w700),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// ==============
-///  ScanPage
-/// ==============
-class ScanPage extends StatefulWidget {
-  const ScanPage({super.key});
-  @override
-  State<ScanPage> createState() => _ScanPageState();
-}
-
-class _ScanPageState extends State<ScanPage> {
-  final MobileScannerController controller = MobileScannerController(
-    detectionSpeed: DetectionSpeed.noDuplicates,
-    facing: CameraFacing.back,
-    torchEnabled: false,
-  );
-  bool _handled = false;
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
-
-  void _onDetect(BarcodeCapture capture) {
-    if (_handled) return;
-    final raw = capture.barcodes.firstOrNull?.rawValue;
-    if (raw == null || raw.isEmpty) return;
-    _handled = true;
-    Navigator.of(context).pop(raw);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: const Text('Escanear código'),
-        actions: [
-          IconButton(icon: const Icon(Icons.cameraswitch), onPressed: () => controller.switchCamera(), tooltip: 'Cambiar cámara'),
-          IconButton(icon: const Icon(Icons.flash_on), onPressed: () => controller.toggleTorch(), tooltip: 'Linterna'),
-        ],
-      ),
-      body: Stack(
-        children: [
-          MobileScanner(controller: controller, onDetect: _onDetect),
-          Align(
-            alignment: Alignment.center,
-            child: Container(
-              width: 260, height: 260,
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.white70, width: 2),
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+// ===== Config =====
+public sealed class SqlConfig { public string ConnectionString { get; init; } = ""; }
+public sealed class QueryConfig { public string SqlText { get; init; } = ""; }
