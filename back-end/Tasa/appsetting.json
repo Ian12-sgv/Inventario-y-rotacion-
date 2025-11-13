@@ -1,0 +1,15 @@
+{
+  "ApiKey": "k9mWIm4Nd3j9KomxkT28cBqJY4eYeWm58X+Fmp1Kq0g=",
+  "Sql": {
+    "ConnectionString": "Server=SERVERDOS\\SERVERSQL_DOS;Database=J101010100_999911;User Id=sa;Password=j2094l,.;TrustServerCertificate=True"
+  },
+  "Query": {
+    "SqlText": "SELECT CONVERT(CHAR(16), D.[Fecha], 120) AS Fecha, D.[Valor] FROM (SELECT TOP 1 [ID], [Fecha], [Valor] FROM [J101010100_999911].[dbo].[TASA_CAMBIO] ORDER BY [Fecha] DESC) AS D UNION ALL SELECT CONVERT(CHAR(16), M.[Fecha], 120) AS Fecha, M.[Valor] FROM (SELECT TOP 1 [ID], [Fecha], [Valor] FROM [J101010100_999911].[dbo].[TASA_CAMBIO_M] ORDER BY [Fecha] DESC) AS M;"
+  },
+  "Kestrel": {
+    "Endpoints": {
+      "Http": { "Url": "http://127.0.0.1:5102" }
+    }
+  }
+}
+
