@@ -5,11 +5,18 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:http/http.dart' as http;
 
-// ===== Config API =====
+// ===== Config API PRINCIPAL =====
 const String kApiBase =
     String.fromEnvironment('API_BASE', defaultValue: 'https://api2.apipalacio.com');
 const String kApiKey =
     String.fromEnvironment('API_KEY', defaultValue: 'k9mWIm4Nd3j9KomxkT28cBqJY4eYeWm58X+Fmp1Kq0g=');
+
+// ===== Config API TASA =====
+const String kTasaBase = String.fromEnvironment(
+  'TASA_BASE',
+  // Solo la base, sin /api/tasa
+  defaultValue: 'https://api4.apipalacio.com',
+);
 
 class ScreenConsulta extends StatefulWidget {
   const ScreenConsulta({super.key});
@@ -35,12 +42,60 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
   bool _loading = false;
 
-  // NUEVO: bandera para ocultar todo y mostrar solo el mensaje
+  // Bandera para ocultar todo y mostrar solo el mensaje
   bool _sinExistencia = false;
+
+  // Datos de tasa (cada una con su fecha)
+  double? _tasaOficial;
+  double? _tasaMayor;
+  String? _tasaFechaOficial;
+  String? _tasaFechaMayor;
 
   bool _isCasaMatriz(String tienda) {
     final t = tienda.toLowerCase();
     return t.contains('casa matriz') || t.contains('matriz') || t.contains('principal');
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _cargarTasa(); // Carga la tasa de cambio al abrir la pantalla
+  }
+
+  // ==== Consumir API de TASA ====
+  Future<void> _cargarTasa() async {
+    try {
+      final uri = Uri.parse('$kTasaBase/api/tasa');
+      final resp = await http.get(uri, headers: {'x-api-key': kApiKey});
+
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body);
+        if (data is List && data.isNotEmpty) {
+          // Fila 0 -> Oficial
+          final first = Map<String, dynamic>.from(data[0] as Map);
+          _tasaFechaOficial = first['fecha']?.toString();
+          _tasaOficial = double.tryParse(first['valor'].toString());
+
+          // Fila 1 -> Mayorista (si existe)
+          if (data.length > 1) {
+            final second = Map<String, dynamic>.from(data[1] as Map);
+            _tasaFechaMayor = second['fecha']?.toString();
+            _tasaMayor = double.tryParse(second['valor'].toString());
+          } else {
+            _tasaFechaMayor = null;
+            _tasaMayor = null;
+          }
+
+          if (mounted) {
+            setState(() {});
+          }
+        }
+      } else {
+        // debugPrint('Error tasa: ${resp.statusCode} ${resp.body}');
+      }
+    } catch (e) {
+      // debugPrint('Error cargando tasa: $e');
+    }
   }
 
   Future<List<Map<String, dynamic>>> _fetchProductoTodas(String codigo) async {
@@ -241,11 +296,13 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // Título + buscador
-              Text('Consulta de precios',
-                  style: theme.textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: -0.2,
-                  )),
+              Text(
+                'Consulta de precios',
+                style: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.2,
+                ),
+              ),
               const SizedBox(height: 10),
               _SearchField(
                 controller: _searchController,
@@ -253,6 +310,8 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
                 onSearch: () => _buscarRegistroPorCodigo(_searchController.text),
                 onScan: _scanBarcode,
               ),
+
+              const SizedBox(height: 10),
 
               if (_loading) ...[
                 const SizedBox(height: 16),
@@ -267,6 +326,18 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
               ]
               // Producto + listas + totales cuando sí hay existencias
               else ...[
+                // Tasa entre barra de búsqueda y producto (acordeón)
+                if (_tasaOficial != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _TasaCard(
+                      fechaOficial: _tasaFechaOficial,
+                      fechaMayor: _tasaFechaMayor,
+                      tasaOficial: _tasaOficial!,
+                      tasaMayor: _tasaMayor,
+                    ),
+                  ),
+
                 if (p != null) _ProductoCard(p),
                 const SizedBox(height: 16),
 
@@ -314,19 +385,22 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       _TotalTile(
-                          label: 'Total Casa Matriz',
-                          total: _totalCasaMatriz,
-                          color: Colors.indigo),
+                        label: 'Total Casa Matriz',
+                        total: _totalCasaMatriz,
+                        color: Colors.indigo,
+                      ),
                       const SizedBox(height: 10),
                       _TotalTile(
-                          label: 'Total Tiendas',
-                          total: _totalTiendas,
-                          color: Colors.deepPurple),
+                        label: 'Total Tiendas',
+                        total: _totalTiendas,
+                        color: Colors.deepPurple,
+                      ),
                       const SizedBox(height: 10),
                       _TotalTile(
-                          label: 'Total General',
-                          total: _totalGeneral,
-                          color: Colors.teal),
+                        label: 'Total General',
+                        total: _totalGeneral,
+                        color: Colors.teal,
+                      ),
                     ],
                   ),
                 ],
@@ -553,7 +627,9 @@ class _ProductoCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: cs.surface,
         borderRadius: BorderRadius.circular(14),
-        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3))],
+        boxShadow: const [
+          BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3))
+        ],
       ),
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -572,8 +648,10 @@ class _ProductoCard extends StatelessWidget {
               children: [
                 const Icon(Icons.qr_code_2, size: 16, color: Colors.black45),
                 const SizedBox(width: 6),
-                Text('Código: ${_val('CodigoBarra')}',
-                    style: const TextStyle(color: Colors.black87)),
+                Text(
+                  'Código: ${_val('CodigoBarra')}',
+                  style: const TextStyle(color: Colors.black87),
+                ),
               ],
             ),
             const SizedBox(height: 4),
@@ -581,8 +659,10 @@ class _ProductoCard extends StatelessWidget {
               children: [
                 const Icon(Icons.tag, size: 16, color: Colors.black45),
                 const SizedBox(width: 6),
-                Text('Referencia: ${_val('Referencia')}',
-                    style: const TextStyle(color: Colors.black87)),
+                Text(
+                  'Referencia: ${_val('Referencia')}',
+                  style: const TextStyle(color: Colors.black87),
+                ),
               ],
             ),
             const SizedBox(height: 10),
@@ -595,6 +675,96 @@ class _ProductoCard extends StatelessWidget {
                 _PricePill(text: 'Promo: $promo Bs'),
               ],
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Tarjeta para Tasa de Cambio (ACORDEÓN, con fecha por cada tasa)
+class _TasaCard extends StatelessWidget {
+  final String? fechaOficial;
+  final String? fechaMayor;
+  final double tasaOficial;
+  final double? tasaMayor;
+
+  const _TasaCard({
+    required this.fechaOficial,
+    required this.fechaMayor,
+    required this.tasaOficial,
+    this.tasaMayor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: cs.primary.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.primary.withOpacity(0.25)),
+      ),
+      child: Theme(
+        data: theme.copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          initiallyExpanded: false,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          title: Row(
+            children: const [
+              Icon(Icons.attach_money, size: 22),
+              SizedBox(width: 8),
+              Text(
+                'Tasa de cambio',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          children: [
+            // Oficial
+            Row(
+              children: [
+                Text(
+                  'Oficial: ${tasaOficial.toStringAsFixed(2)}',
+                  style: const TextStyle(fontSize: 13),
+                ),
+                if (fechaOficial != null) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    fechaOficial!,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Colors.black54,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 4),
+            // Mayorista
+            if (tasaMayor != null)
+              Row(
+                children: [
+                  Text(
+                    'Mayorista: ${tasaMayor!.toStringAsFixed(2)}',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  if (fechaMayor != null) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      fechaMayor!,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.black54,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
           ],
         ),
       ),
@@ -684,7 +854,7 @@ class _QtyPill extends StatelessWidget {
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
-        'x$value',
+        '$value',
         style: TextStyle(
           color: cs.primary,
           fontWeight: FontWeight.w800,
@@ -725,13 +895,20 @@ class _TotalTile extends StatelessWidget {
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style:
-                  const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
-          Text('$total',
-              style: const TextStyle(
-                  color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16)),
+          Text(
+            '$total',
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w900,
+              fontSize: 16,
+            ),
+          ),
         ],
       ),
     );
@@ -808,13 +985,15 @@ class _ScanPageState extends State<ScanPage> {
         title: const Text('Escanear código'),
         actions: [
           IconButton(
-              icon: const Icon(Icons.cameraswitch),
-              onPressed: () => controller.switchCamera(),
-              tooltip: 'Cambiar cámara'),
+            icon: const Icon(Icons.cameraswitch),
+            onPressed: () => controller.switchCamera(),
+            tooltip: 'Cambiar cámara',
+          ),
           IconButton(
-              icon: const Icon(Icons.flash_on),
-              onPressed: () => controller.toggleTorch(),
-              tooltip: 'Linterna'),
+            icon: const Icon(Icons.flash_on),
+            onPressed: () => controller.toggleTorch(),
+            tooltip: 'Linterna',
+          ),
         ],
       ),
       body: Stack(
