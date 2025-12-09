@@ -53,7 +53,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
   bool _isCasaMatriz(String tienda) {
     final t = tienda.toLowerCase();
-    return t.contains('casa matriz') || t.contains('matriz') || t.contains('principal');
+    return t.contains('casa matriz') || t.contains('matriz') ;
   }
 
   @override
