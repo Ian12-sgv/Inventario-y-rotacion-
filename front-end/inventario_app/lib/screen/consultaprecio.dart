@@ -1,6 +1,7 @@
 // lib/screen/consultaprecio.dart
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:http/http.dart' as http;
@@ -53,13 +54,51 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
   bool _isCasaMatriz(String tienda) {
     final t = tienda.toLowerCase();
-    return t.contains('casa matriz') || t.contains('matriz') ;
+    return t.contains('casa matriz') || t.contains('matriz');
   }
 
   @override
   void initState() {
     super.initState();
     _cargarTasa(); // Carga la tasa de cambio al abrir la pantalla
+  }
+
+  // ==== NUEVO: Normalización EAN/UPC para evitar 404 por formato ====
+  // - deja solo dígitos
+  // - si viene UPC-A (12), lo transforma a EAN-13 agregando "0" al inicio
+  // - si viene EAN-13 que empieza con 0, también podremos probar sin el 0 (fallback)
+  String _normalizeCodigo(String raw) {
+    final digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
+    if (digits.isEmpty) return '';
+    if (digits.length == 12) return '0$digits';
+    return digits;
+  }
+
+  // Crea lista de candidatos a probar (para reducir falsos 404 por 12/13 dígitos)
+  List<String> _codigoCandidates(String raw) {
+    final digitsOnly = raw.replaceAll(RegExp(r'[^0-9]'), '');
+    if (digitsOnly.isEmpty) return const [];
+
+    final normalized = _normalizeCodigo(raw);
+    final candidates = <String>{};
+
+    // 1) Lo normalizado primero
+    if (normalized.isNotEmpty) candidates.add(normalized);
+
+    // 2) El original solo-dígitos también (por si backend guarda distinto)
+    candidates.add(digitsOnly);
+
+    // 3) Si normalizado quedó con 13 y empieza con 0, probar sin 0
+    if (normalized.length == 13 && normalized.startsWith('0')) {
+      candidates.add(normalized.substring(1)); // 12 dígitos
+    }
+
+    // 4) Si viene 12, probar con 0 al inicio (13)
+    if (digitsOnly.length == 12) {
+      candidates.add('0$digitsOnly');
+    }
+
+    return candidates.toList();
   }
 
   // ==== Consumir API de TASA ====
@@ -100,7 +139,21 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
   Future<List<Map<String, dynamic>>> _fetchProductoTodas(String codigo) async {
     final uri = Uri.parse('$kApiBase/api/productos/$codigo/todas');
-    final resp = await http.get(uri, headers: {'x-api-key': kApiKey});
+
+    http.Response resp;
+    try {
+      resp = await http
+          .get(uri, headers: {'x-api-key': kApiKey})
+          .timeout(const Duration(seconds: 12));
+    } on TimeoutException {
+      throw 'La solicitud tardó demasiado. Intenta nuevamente.';
+    } on SocketException {
+      throw 'Sin conexión. Verifica tu internet e intenta nuevamente.';
+    } on http.ClientException {
+      throw 'Error de red. Intenta nuevamente.';
+    } catch (_) {
+      throw 'No se pudo conectar. Intenta nuevamente.';
+    }
 
     if (resp.statusCode == 200) {
       final data = jsonDecode(resp.body);
@@ -115,27 +168,84 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
             })
             .toList();
       }
-      throw Exception('Respuesta inesperada del servidor.');
+      throw 'Respuesta inesperada del servidor.';
     }
 
     if (resp.statusCode == 404) {
       return [];
     }
 
-    // ProblemDetails opcional
+    // NUEVO: mensajes claros según JSON {code,message} o statusCode
+    throw _apiErrorMessage(resp);
+  }
+
+  String _apiErrorMessage(http.Response resp) {
+    final status = resp.statusCode;
+    final body = resp.body;
+
+    // 1) Intentar leer el contrato { code, message, traceId }
     try {
-      final p = jsonDecode(resp.body);
-      final title = p['title'] ?? 'Error';
-      final detail = p['detail'] ?? 'Fallo en la solicitud.';
-      throw Exception('$title: $detail');
+      if (body.isNotEmpty) {
+        final decoded = jsonDecode(body);
+        if (decoded is Map) {
+          final map = Map<String, dynamic>.from(decoded);
+          final code = (map['code'] ?? '').toString();
+          final msg = (map['message'] ?? '').toString();
+
+          if (code.isNotEmpty) {
+            switch (code) {
+              case 'scan_too_fast':
+                return 'Escaneo muy rápido. Espera un momento y vuelve a intentar.';
+              case 'db_timeout':
+                return 'La consulta tardó demasiado. Intenta nuevamente.';
+              case 'db_error':
+                return 'No se pudo consultar la base de datos. Intenta de nuevo.';
+              case 'invalid_api_key':
+                return 'Acceso no autorizado. Verifica el API key.';
+              case 'invalid_code':
+                return 'Código inválido. Vuelve a escanear.';
+              case 'not_found':
+                return 'Producto no encontrado.';
+              case 'server_error':
+                return 'Ocurrió un error interno. Intenta más tarde.';
+              default:
+                // Si backend manda un mensaje útil, usarlo
+                if (msg.trim().isNotEmpty) return msg.trim();
+                break;
+            }
+          }
+
+          // Si no hay code, pero hay message
+          if (msg.trim().isNotEmpty) return msg.trim();
+        }
+      }
     } catch (_) {
-      throw Exception('HTTP ${resp.statusCode}: ${resp.reasonPhrase}');
+      // Si no es JSON válido, seguimos con status code
+    }
+
+    // 2) Fallback por status code
+    switch (status) {
+      case 400:
+        return 'Solicitud inválida. Verifica el código e intenta nuevamente.';
+      case 401:
+        return 'Acceso no autorizado. Verifica el API key.';
+      case 404:
+        return 'Producto no encontrado.';
+      case 429:
+        return 'Escaneo muy rápido. Espera un momento y vuelve a intentar.';
+      case 503:
+        return 'No se pudo consultar la base de datos. Intenta de nuevo.';
+      case 504:
+        return 'La consulta tardó demasiado. Intenta nuevamente.';
+      default:
+        return 'Error del servidor (HTTP $status). Intenta nuevamente.';
     }
   }
 
   Future<void> _buscarRegistroPorCodigo(String codigoBarra) async {
-    final code = codigoBarra.trim();
-    if (code.isEmpty) return;
+    // ===== CAMBIO: normaliza + prueba candidatos para evitar 404 por UPC/EAN =====
+    final candidates = _codigoCandidates(codigoBarra);
+    if (candidates.isEmpty) return;
 
     setState(() {
       _loading = true;
@@ -143,7 +253,13 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
     });
 
     try {
-      final rows = await _fetchProductoTodas(code);
+      List<Map<String, dynamic>> rows = [];
+
+      // Intentar cada candidato hasta conseguir data
+      for (final c in candidates) {
+        rows = await _fetchProductoTodas(c);
+        if (rows.isNotEmpty) break;
+      }
 
       if (rows.isEmpty) {
         // No existe el producto en la consulta
@@ -956,11 +1072,17 @@ class ScanPage extends StatefulWidget {
 
 class _ScanPageState extends State<ScanPage> {
   final MobileScannerController controller = MobileScannerController(
-    detectionSpeed: DetectionSpeed.noDuplicates,
+    detectionSpeed: DetectionSpeed.normal,
     facing: CameraFacing.back,
     torchEnabled: false,
   );
+
   bool _handled = false;
+
+  // ===== NUEVO: estabilidad para evitar códigos “inventados” =====
+  String? _lastValue;
+  int _stableHits = 0;
+  DateTime? _lastSeen;
 
   @override
   void dispose() {
@@ -968,17 +1090,80 @@ class _ScanPageState extends State<ScanPage> {
     super.dispose();
   }
 
+  // ===== NUEVO: helpers para filtrar/validar EAN-13 y UPC-A =====
+  String _onlyDigits(String s) => s.replaceAll(RegExp(r'[^0-9]'), '');
+
+  bool _isValidEan13(String digits13) {
+    if (digits13.length != 13) return false;
+    if (!RegExp(r'^\d{13}$').hasMatch(digits13)) return false;
+
+    int sum = 0;
+    // posiciones 1..12 (0..11)
+    for (int i = 0; i < 12; i++) {
+      final d = digits13.codeUnitAt(i) - 48;
+      // EAN-13: posiciones pares (2,4,6,...) multiplican por 3
+      sum += (i % 2 == 0) ? d : (d * 3);
+    }
+    final mod = sum % 10;
+    final check = (10 - mod) % 10;
+    final last = digits13.codeUnitAt(12) - 48;
+    return check == last;
+  }
+
   void _onDetect(BarcodeCapture capture) {
     if (_handled) return;
-    final codes = capture.barcodes;
-    final raw = (codes.isNotEmpty ? codes.first.rawValue : null);
-    if (raw == null || raw.isEmpty) return;
-    _handled = true;
-    Navigator.of(context).pop(raw);
+
+    // 1) Elegir el mejor candidato: dígitos + longitud 12/13 + checksum válido
+    String? candidate;
+    for (final b in capture.barcodes) {
+      final raw = b.rawValue;
+      if (raw == null || raw.isEmpty) continue;
+
+      final digits = _onlyDigits(raw);
+      if (digits.length == 13) {
+        if (_isValidEan13(digits)) {
+          candidate = digits;
+          break;
+        }
+      } else if (digits.length == 12) {
+        // UPC-A: validar como EAN-13 con prefijo 0
+        final ean13 = '0$digits';
+        if (_isValidEan13(ean13)) {
+          // Devuelve el UPC-A en 12 (tu lógica de normalización lo maneja)
+          candidate = digits;
+          break;
+        }
+      }
+    }
+
+    // si no hay un candidato confiable, no hacemos nada
+    if (candidate == null) return;
+
+    // 2) Estabilidad: exigir 2 lecturas iguales seguidas dentro de 800ms
+    final now = DateTime.now();
+    final lastSeen = _lastSeen;
+
+    final withinWindow = lastSeen != null &&
+        now.difference(lastSeen) < const Duration(milliseconds: 1500);
+
+    if (_lastValue == candidate && withinWindow) {
+      _stableHits++;
+    } else {
+      _stableHits = 1;
+      _lastValue = candidate;
+    }
+    _lastSeen = now;
+
+    if (_stableHits >= 2) {
+      _handled = true;
+      Navigator.of(context).pop(candidate);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    const double scanSize = 260.0; // mismo tamaño que el recuadro
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -996,21 +1181,38 @@ class _ScanPageState extends State<ScanPage> {
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          MobileScanner(controller: controller, onDetect: _onDetect),
-          Align(
-            alignment: Alignment.center,
-            child: Container(
-              width: 260,
-              height: 260,
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.white70, width: 2),
-                borderRadius: BorderRadius.circular(12),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final size = constraints.biggest;
+
+          // Ventana de escaneo centrada (solo aquí detecta)
+          final scanWindow = Rect.fromCenter(
+            center: Offset(size.width / 2, size.height / 2),
+            width: scanSize,
+            height: scanSize,
+          );
+
+          return Stack(
+            children: [
+              MobileScanner(
+                controller: controller,
+                onDetect: _onDetect,
+                scanWindow: scanWindow, // <-- limita detección al recuadro
               ),
-            ),
-          ),
-        ],
+              Align(
+                alignment: Alignment.center,
+                child: Container(
+                  width: scanSize,
+                  height: scanSize,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.white70, width: 2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

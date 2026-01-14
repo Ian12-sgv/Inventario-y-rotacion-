@@ -6,9 +6,12 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+
 using Microsoft.Data.SqlClient;
-using Microsoft.AspNetCore.Builder; // WebApplication
-using Microsoft.AspNetCore.Http;    // Results, StatusCodes
+using Microsoft.AspNetCore.Builder;      // WebApplication
+using Microsoft.AspNetCore.Http;         // Results, StatusCodes
+using Microsoft.AspNetCore.RateLimiting; // Rate limiting (NET 7+)
+using System.Threading.RateLimiting;     // FixedWindowRateLimiterOptions, etc.
 
 // ===== Build =====
 var builder = WebApplication.CreateBuilder(args);
@@ -26,6 +29,48 @@ var qryCfg  = cfg.GetRequiredSection("Query").Get<QueryConfig>()!;
 var connStr = sqlCfg.ConnectionString;
 var sqlText = qryCfg.SqlText;
 
+// ===== Rate Limiting (para escaneos muy rápidos) =====
+// Requiere .NET 7/8. Si estás en .NET 6, esto no compila y hay que usar un middleware alterno.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    // Respuesta JSON uniforme cuando se excede el límite
+    options.OnRejected = async (context, token) =>
+    {
+        var http = context.HttpContext;
+
+        if (!http.Response.HasStarted)
+        {
+            http.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            await http.Response.WriteAsJsonAsync(
+                new ApiError(
+                    code: "scan_too_fast",
+                    message: "Escaneo muy rápido. Espera un momento y vuelve a intentar.",
+                    traceId: http.TraceIdentifier
+                ),
+                cancellationToken: token
+            );
+        }
+    };
+
+    // 1 request cada 700ms por cliente (IP). Ajusta Window si deseas.
+    options.AddPolicy("scan", httpContext =>
+    {
+        var key = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: key,
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 1,
+                Window = TimeSpan.FromMilliseconds(700),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }
+        );
+    });
+});
+
 var app = builder.Build();
 
 // ===== Auth por API-Key (solo /api/*) =====
@@ -36,13 +81,16 @@ app.Use(async (ctx, next) =>
         var key = ctx.Request.Headers["x-api-key"].ToString();
         if (!string.Equals(key, apiKey, StringComparison.Ordinal))
         {
-            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await ctx.Response.WriteAsJsonAsync(new { error = "invalid_api_key" });
+            await Fail(ctx, StatusCodes.Status401Unauthorized, "invalid_api_key", "API key inválida.")
+                .ExecuteAsync(ctx);
             return;
         }
     }
     await next();
 });
+
+// ===== Activa Rate Limiter =====
+app.UseRateLimiter();
 
 // ===== Endpoints =====
 app.MapGet("/api/ping", () => Results.Ok(new { ok = true }));
@@ -51,11 +99,12 @@ app.MapGet("/api/ping", () => Results.Ok(new { ok = true }));
 app.MapGet("/healthz", () => Results.Ok(new { ok = true }));
 
 // SELECT completo → JSON (o CSV con ?format=csv)
-app.MapGet("/api/inventario", async (HttpContext http) =>
+app.MapGet("/api/inventario", async (HttpContext ctx) =>
 {
     try
     {
-        string format = http.Request.Query["format"];
+        string format = ctx.Request.Query["format"];
+
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
             var bytes = await ExportCsvAsync(connStr, sqlText);
@@ -68,37 +117,67 @@ app.MapGet("/api/inventario", async (HttpContext http) =>
             return Results.Ok(rows);
         }
     }
-    catch (Exception ex)
+    catch (SqlException ex) when (ex.Number == -2) // timeout SQL Server
     {
-        return Results.Problem(title: "Inventario falló", detail: ex.Message, statusCode: 500);
+        return Fail(ctx, 504, "db_timeout", "La consulta tardó demasiado. Intenta nuevamente.");
+    }
+    catch (SqlException)
+    {
+        return Fail(ctx, 503, "db_error", "No se pudo consultar la base de datos. Intenta de nuevo.");
+    }
+    catch
+    {
+        return Fail(ctx, 500, "server_error", "Ocurrió un error interno.");
     }
 });
 
 // 1) Una sola fila (primera coincidencia por Código de barras)
-app.MapGet("/api/productos/{codigo}", async (string codigo) =>
+app.MapGet("/api/productos/{codigo}", async (HttpContext ctx, string codigo) =>
 {
+    // Validación mínima (ajusta a tu formato real: EAN13, etc.)
+    if (string.IsNullOrWhiteSpace(codigo) || codigo.Length < 6)
+        return Fail(ctx, 400, "invalid_code", "Código inválido. Vuelve a escanear.");
+
     try
     {
         var sql  = WrapWithWhere(sqlText, "CodigoBarra", "= @codigo", outerOrderBy: "ORDER BY src.Tienda, src.Region");
         var rows = await QueryAsDictsAsync(connStr, sql, new SqlParameter("@codigo", codigo));
         AjustarPrecioDetal(rows); // 1.16 y redondeo
-        return rows.Count == 0 ? Results.NotFound() : Results.Ok(rows[0]);
+
+        if (rows.Count == 0)
+            return Fail(ctx, 404, "not_found", "Producto no encontrado.");
+
+        return Results.Ok(rows[0]);
     }
-    catch (Exception ex)
+    catch (SqlException ex) when (ex.Number == -2)
     {
-        return Results.Problem(title: "Consulta de producto falló", detail: ex.Message, statusCode: 500);
+        return Fail(ctx, 504, "db_timeout", "La consulta tardó demasiado. Intenta nuevamente.");
     }
-});
+    catch (SqlException)
+    {
+        return Fail(ctx, 503, "db_error", "No se pudo consultar la base de datos. Intenta de nuevo.");
+    }
+    catch
+    {
+        return Fail(ctx, 500, "server_error", "Ocurrió un error interno.");
+    }
+})
+.RequireRateLimiting("scan");
 
 // 2) Todas las sucursales + 3 totales al final
-app.MapGet("/api/productos/{codigo}/todas", async (string codigo) =>
+app.MapGet("/api/productos/{codigo}/todas", async (HttpContext ctx, string codigo) =>
 {
+    if (string.IsNullOrWhiteSpace(codigo) || codigo.Length < 6)
+        return Fail(ctx, 400, "invalid_code", "Código inválido. Vuelve a escanear.");
+
     try
     {
         var sql  = WrapWithWhere(sqlText, "CodigoBarra", "= @codigo", outerOrderBy: "ORDER BY src.Tienda, src.Region");
         var rows = await QueryAsDictsAsync(connStr, sql, new SqlParameter("@codigo", codigo));
         AjustarPrecioDetal(rows); // 1.16 y redondeo
-        if (rows.Count == 0) return Results.NotFound();
+
+        if (rows.Count == 0)
+            return Fail(ctx, 404, "not_found", "Producto no encontrado.");
 
         // Sumar existencias separando Casa Matriz vs Tiendas
         decimal sumMatriz = 0m, sumTiendas = 0m;
@@ -149,20 +228,33 @@ app.MapGet("/api/productos/{codigo}/todas", async (string codigo) =>
 
         return Results.Ok(outList);
     }
-    catch (Exception ex)
+    catch (SqlException ex) when (ex.Number == -2)
     {
-        return Results.Problem(title: "Consulta de sucursales falló", detail: ex.Message, statusCode: 500);
+        return Fail(ctx, 504, "db_timeout", "La consulta tardó demasiado. Intenta nuevamente.");
     }
-});
+    catch (SqlException)
+    {
+        return Fail(ctx, 503, "db_error", "No se pudo consultar la base de datos. Intenta de nuevo.");
+    }
+    catch
+    {
+        return Fail(ctx, 500, "server_error", "Ocurrió un error interno.");
+    }
+})
+.RequireRateLimiting("scan");
 
 // 3) Resumen — SOLO TOTALES (con flag si no hay stock)
-app.MapGet("/api/productos/{codigo}/resumen", async (string codigo) =>
+app.MapGet("/api/productos/{codigo}/resumen", async (HttpContext ctx, string codigo) =>
 {
+    if (string.IsNullOrWhiteSpace(codigo) || codigo.Length < 6)
+        return Fail(ctx, 400, "invalid_code", "Código inválido. Vuelve a escanear.");
+
     try
     {
         var sql  = WrapWithWhere(sqlText, "CodigoBarra", "= @codigo", outerOrderBy: "ORDER BY src.Tienda, src.Region");
         var rows = await QueryAsDictsAsync(connStr, sql, new SqlParameter("@codigo", codigo));
-        if (rows.Count == 0) return Results.NotFound();
+        if (rows.Count == 0)
+            return Fail(ctx, 404, "not_found", "Producto no encontrado.");
 
         decimal sumMatriz = 0m, sumTiendas = 0m;
         foreach (var r in rows)
@@ -192,15 +284,27 @@ app.MapGet("/api/productos/{codigo}/resumen", async (string codigo) =>
 
         return Results.Ok(totales);
     }
-    catch (Exception ex)
+    catch (SqlException ex) when (ex.Number == -2)
     {
-        return Results.Problem(title: "Resumen falló", detail: ex.Message, statusCode: 500);
+        return Fail(ctx, 504, "db_timeout", "La consulta tardó demasiado. Intenta nuevamente.");
     }
-});
+    catch (SqlException)
+    {
+        return Fail(ctx, 503, "db_error", "No se pudo consultar la base de datos. Intenta de nuevo.");
+    }
+    catch
+    {
+        return Fail(ctx, 500, "server_error", "Ocurrió un error interno.");
+    }
+})
+.RequireRateLimiting("scan");
 
 app.Run();
 
-// ===== Helpers =====
+// ===== Helpers (todas las funciones juntas, sin tipos en medio) =====
+static IResult Fail(HttpContext ctx, int statusCode, string code, string message) =>
+    Results.Json(new ApiError(code, message, ctx.TraceIdentifier), statusCode: statusCode);
+
 static async Task<List<Dictionary<string, object?>>> QueryAsDictsAsync(string connStr, string sql, params SqlParameter[]? parameters)
 {
     using var conn = new SqlConnection(connStr);
@@ -388,6 +492,8 @@ static Dictionary<string, object?> CabeceraProducto(Dictionary<string, object?> 
         ["Status"]          = null
     };
 
-// ===== Config =====
+// ===== Tipos (todos juntos al final) =====
+public sealed record ApiError(string code, string message, string? traceId = null);
+
 public sealed class SqlConfig { public string ConnectionString { get; init; } = ""; }
 public sealed class QueryConfig { public string SqlText { get; init; } = ""; }
