@@ -6,11 +6,15 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:http/http.dart' as http;
 
+import '../app_session.dart';
+import '../platform_support.dart';
+import '../scanner_support.dart';
+
 // ===== Config API PRINCIPAL =====
-const String kApiBase =
-    String.fromEnvironment('API_BASE', defaultValue: 'https://api2.apipalacio.com');
-const String kApiKey =
-    String.fromEnvironment('API_KEY', defaultValue: 'k9mWIm4Nd3j9KomxkT28cBqJY4eYeWm58X+Fmp1Kq0g=');
+const String kApiBase = String.fromEnvironment('API_BASE',
+    defaultValue: 'https://api2.apipalacio.com');
+const String kTasaApiKey = String.fromEnvironment('API_KEY',
+    defaultValue: 'k9mWIm4Nd3j9KomxkT28cBqJY4eYeWm58X+Fmp1Kq0g=');
 
 // ===== Config API TASA =====
 const String kTasaBase = String.fromEnvironment(
@@ -20,7 +24,13 @@ const String kTasaBase = String.fromEnvironment(
 );
 
 class ScreenConsulta extends StatefulWidget {
-  const ScreenConsulta({super.key});
+  const ScreenConsulta({
+    super.key,
+    required this.session,
+  });
+
+  final AppSession session;
+
   @override
   State<ScreenConsulta> createState() => _ScreenConsultaState();
 }
@@ -51,11 +61,29 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
   double? _tasaMayor;
   String? _tasaFechaOficial;
   String? _tasaFechaMayor;
+  bool _loadingTasa = false;
+  String? _tasaError;
 
-  bool _isCasaMatriz(String tienda) {
-    final t = tienda.toLowerCase();
-    return t.contains('casa matriz') || t.contains('matriz');
+  bool _asBool(dynamic value) {
+    if (value is bool) return value;
+
+    final normalized = (value ?? '').toString().trim().toLowerCase();
+    return normalized == 'true' || normalized == '1';
   }
+
+  bool _isBodega(Map<String, dynamic> row) {
+    if (row.containsKey('EsBodega') && row['EsBodega'] != null) {
+      return _asBool(row['EsBodega']);
+    }
+
+    if (row.containsKey('Tipo') && row['Tipo'] != null) {
+      return !_asBool(row['Tipo']);
+    }
+
+    return false;
+  }
+
+  Map<String, String> get _apiHeaders => widget.session.authHeaders;
 
   @override
   void initState() {
@@ -103,9 +131,18 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
   // ==== Consumir API de TASA ====
   Future<void> _cargarTasa() async {
+    if (mounted) {
+      setState(() {
+        _loadingTasa = true;
+        _tasaError = null;
+      });
+    }
+
     try {
       final uri = Uri.parse('$kTasaBase/api/tasa');
-      final resp = await http.get(uri, headers: {'x-api-key': kApiKey});
+      final resp = await http.get(uri, headers: {
+        'x-api-key': kTasaApiKey
+      }).timeout(const Duration(seconds: 10));
 
       if (resp.statusCode == 200) {
         final data = jsonDecode(resp.body);
@@ -125,15 +162,27 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
             _tasaMayor = null;
           }
 
-          if (mounted) {
-            setState(() {});
-          }
+          _tasaError = _tasaOficial == null
+              ? 'No hay tasa disponible en este momento.'
+              : null;
+        } else {
+          _tasaError = 'No hay tasa disponible en este momento.';
         }
+      } else if (resp.statusCode == 401) {
+        _tasaError = 'No se pudo autorizar la consulta de la tasa.';
       } else {
-        // debugPrint('Error tasa: ${resp.statusCode} ${resp.body}');
+        _tasaError = 'No se pudo cargar la tasa del dia.';
       }
-    } catch (e) {
-      // debugPrint('Error cargando tasa: $e');
+    } on TimeoutException {
+      _tasaError = 'La consulta de tasa tardo demasiado.';
+    } catch (_) {
+      _tasaError = 'No se pudo cargar la tasa del dia.';
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loadingTasa = false;
+        });
+      }
     }
   }
 
@@ -143,7 +192,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
     http.Response resp;
     try {
       resp = await http
-          .get(uri, headers: {'x-api-key': kApiKey})
+          .get(uri, headers: _apiHeaders)
           .timeout(const Duration(seconds: 12));
     } on TimeoutException {
       throw 'La solicitud tardó demasiado. Intenta nuevamente.';
@@ -159,14 +208,10 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
       final data = jsonDecode(resp.body);
       if (data is List) {
         // Filtra filas de totales si vinieran en la respuesta
-        return data
-            .whereType<Map>()
-            .cast<Map<String, dynamic>>()
-            .where((m) {
-              final tienda = (m['Tienda'] ?? '').toString().toUpperCase();
-              return !(tienda.startsWith('TOTAL '));
-            })
-            .toList();
+        return data.whereType<Map>().cast<Map<String, dynamic>>().where((m) {
+          final tienda = (m['Tienda'] ?? '').toString().toUpperCase();
+          return !(tienda.startsWith('TOTAL '));
+        }).toList();
       }
       throw 'Respuesta inesperada del servidor.';
     }
@@ -201,7 +246,8 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
               case 'db_error':
                 return 'No se pudo consultar la base de datos. Intenta de nuevo.';
               case 'invalid_api_key':
-                return 'Acceso no autorizado. Verifica el API key.';
+              case 'invalid_credentials':
+                return 'Acceso no autorizado. Verifica tu usuario y contrasena.';
               case 'invalid_code':
                 return 'Código inválido. Vuelve a escanear.';
               case 'not_found':
@@ -228,7 +274,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
       case 400:
         return 'Solicitud inválida. Verifica el código e intenta nuevamente.';
       case 401:
-        return 'Acceso no autorizado. Verifica el API key.';
+        return 'Acceso no autorizado. Verifica tu usuario y contrasena.';
       case 404:
         return 'Producto no encontrado.';
       case 429:
@@ -285,7 +331,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
       // Cabecera de producto
       final header = rows.first;
 
-      // Separa Casa Matriz vs Tiendas y calcula totales
+      // Separa Bodegas vs Tiendas y calcula totales
       int total = 0;
       int totalCM = 0;
       final List<Map<String, dynamic>> casaMatriz = [];
@@ -293,10 +339,9 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
       for (final r in rows) {
         final ex = _asInt(r['Existencia']);
-        final tienda = _asString(r['Tienda']);
         total += ex;
 
-        if (_isCasaMatriz(tienda)) {
+        if (_isBodega(r)) {
           totalCM += ex;
           casaMatriz.add(r);
         } else {
@@ -365,8 +410,19 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
     }
   }
 
-  // Scan con mobile_scanner
   Future<void> _scanBarcode() async {
+    if (isDesktopPlatform) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'En escritorio usa el teclado o un lector USB y presiona Enter.',
+          ),
+        ),
+      );
+      _focusNode.requestFocus();
+      return;
+    }
+
     try {
       final scanned = await Navigator.push<String>(
         context,
@@ -406,6 +462,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
       backgroundColor: cs.surface.withOpacity(0.98),
       body: SafeArea(
         child: SingleChildScrollView(
+          key: const PageStorageKey<String>('consulta-scroll'),
           physics: const BouncingScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
           child: Column(
@@ -423,7 +480,8 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
               _SearchField(
                 controller: _searchController,
                 focusNode: _focusNode,
-                onSearch: () => _buscarRegistroPorCodigo(_searchController.text),
+                onSearch: () =>
+                    _buscarRegistroPorCodigo(_searchController.text),
                 onScan: _scanBarcode,
               ),
 
@@ -436,6 +494,19 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
 
               const SizedBox(height: 18),
 
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _TasaCard(
+                  fechaOficial: _tasaFechaOficial,
+                  fechaMayor: _tasaFechaMayor,
+                  tasaOficial: _tasaOficial,
+                  tasaMayor: _tasaMayor,
+                  isLoading: _loadingTasa,
+                  errorMessage: _tasaError,
+                  onRetry: _cargarTasa,
+                ),
+              ),
+
               // SOLO mensaje cuando no hay existencias
               if (!_loading && _sinExistencia) ...[
                 const _SinExistenciaCard(),
@@ -443,36 +514,27 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
               // Producto + listas + totales cuando sí hay existencias
               else ...[
                 // Tasa entre barra de búsqueda y producto (acordeón)
-                if (_tasaOficial != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: _TasaCard(
-                      fechaOficial: _tasaFechaOficial,
-                      fechaMayor: _tasaFechaMayor,
-                      tasaOficial: _tasaOficial!,
-                      tasaMayor: _tasaMayor,
-                    ),
-                  ),
-
                 if (p != null) _ProductoCard(p),
                 const SizedBox(height: 16),
 
                 if (_stock.isNotEmpty) ...[
-                  // ========== CASA MATRIZ ==========
+                  // ========== BODEGAS ==========
                   if (_stockCasaMatriz.isNotEmpty) ...[
                     const _SectionHeader(
                       icon: Icons.home_filled,
-                      title: 'Casa Matriz',
+                      title: 'Bodegas',
                     ),
                     const SizedBox(height: 8),
                     ..._stockCasaMatriz.map((r) {
                       final tienda = _asString(r['Tienda']);
                       final existencia = _asInt(r['Existencia']);
+                      final status = r['Status'];
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: _StockTile(
                           tienda: tienda,
                           existencia: existencia,
+                          status: status,
                           isCasaMatriz: true,
                         ),
                       );
@@ -501,7 +563,7 @@ class _ScreenConsultaState extends State<ScreenConsulta> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       _TotalTile(
-                        label: 'Total Casa Matriz',
+                        label: 'Total Bodegas',
                         total: _totalCasaMatriz,
                         color: Colors.indigo,
                       ),
@@ -552,7 +614,8 @@ class _RegionGroups extends StatelessWidget {
         expansionTileTheme: ExpansionTileThemeData(
           backgroundColor: cs.surface,
           collapsedBackgroundColor: cs.surface,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           collapsedShape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           tilePadding: const EdgeInsets.symmetric(horizontal: 12),
@@ -579,6 +642,7 @@ class _RegionGroups extends StatelessWidget {
               ],
             ),
             child: ExpansionTile(
+              key: PageStorageKey<String>('region-$region'),
               title: Row(
                 children: [
                   Expanded(
@@ -593,9 +657,11 @@ class _RegionGroups extends StatelessWidget {
               children: items.map((r) {
                 final tienda = asString(r['Tienda']);
                 final existencia = asInt(r['Existencia']);
+                final status = r['Status'];
                 return _StockTile(
                   tienda: tienda,
                   existencia: existencia,
+                  status: status,
                   isCasaMatriz: false,
                 );
               }).toList(),
@@ -643,11 +709,13 @@ class _SearchField extends StatelessWidget {
             icon: const Icon(Icons.search),
             onPressed: onSearch,
           ),
-          suffixIcon: IconButton(
-            icon: const Icon(Icons.qr_code_scanner),
-            onPressed: onScan,
-            tooltip: 'Escanear',
-          ),
+          suffixIcon: isDesktopPlatform
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.qr_code_scanner),
+                  onPressed: onScan,
+                  tooltip: 'Escanear',
+                ),
           filled: true,
           fillColor: cs.surface,
           border: OutlineInputBorder(
@@ -731,13 +799,14 @@ class _ProductoCard extends StatelessWidget {
     final dolarMayor = _val('DolarMayor'); // viene de 'dolarMayor' en backend
     final promo = _valOrZero('PrecioPromocion');
 
-    bool has(String s) =>
-        s.isNotEmpty && s != '0' && s != '0.0' && s != '0.00';
+    bool has(String s) => s.isNotEmpty && s != '0' && s != '0.0' && s != '0.00';
 
-    final detalLine =
-        has(dolarDetal) ? 'Detal: $detal Bs - Dolar: $dolarDetal' : 'Detal: $detal Bs';
-    final mayorLine =
-        has(dolarMayor) ? 'Mayor: $mayor Bs - Dolar mayor: $dolarMayor' : 'Mayor: $mayor Bs';
+    final detalLine = has(dolarDetal)
+        ? 'Detal: $detal Bs - Dolar: $dolarDetal'
+        : 'Detal: $detal Bs';
+    final mayorLine = has(dolarMayor)
+        ? 'Mayor: $mayor Bs - Dolar mayor: $dolarMayor'
+        : 'Mayor: $mayor Bs';
 
     return Container(
       decoration: BoxDecoration(
@@ -802,14 +871,20 @@ class _ProductoCard extends StatelessWidget {
 class _TasaCard extends StatelessWidget {
   final String? fechaOficial;
   final String? fechaMayor;
-  final double tasaOficial;
+  final double? tasaOficial;
   final double? tasaMayor;
+  final bool isLoading;
+  final String? errorMessage;
+  final Future<void> Function() onRetry;
 
   const _TasaCard({
     required this.fechaOficial,
     required this.fechaMayor,
     required this.tasaOficial,
     this.tasaMayor,
+    required this.isLoading,
+    required this.errorMessage,
+    required this.onRetry,
   });
 
   @override
@@ -827,6 +902,7 @@ class _TasaCard extends StatelessWidget {
       child: Theme(
         data: theme.copyWith(dividerColor: Colors.transparent),
         child: ExpansionTile(
+          key: const PageStorageKey<String>('consulta-tasa-card'),
           initiallyExpanded: false,
           tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -835,44 +911,40 @@ class _TasaCard extends StatelessWidget {
               Icon(Icons.attach_money, size: 22),
               SizedBox(width: 8),
               Text(
-                'Tasa de cambio',
+                'Tasa del dia',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
             ],
           ),
           children: [
-            // Oficial
-            Row(
-              children: [
-                Text(
-                  'Oficial: ${tasaOficial.toStringAsFixed(2)}',
-                  style: const TextStyle(fontSize: 13),
-                ),
-                if (fechaOficial != null) ...[
-                  const SizedBox(width: 8),
-                  Text(
-                    fechaOficial!,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Colors.black54,
+            if (isLoading && tasaOficial == null) ...[
+              Row(
+                children: const [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Cargando tasa del dia...',
+                      style: TextStyle(fontSize: 13),
                     ),
                   ),
                 ],
-              ],
-            ),
-            const SizedBox(height: 4),
-            // Mayorista
-            if (tasaMayor != null)
+              ),
+            ] else if (tasaOficial != null) ...[
               Row(
                 children: [
                   Text(
-                    'Mayorista: ${tasaMayor!.toStringAsFixed(2)}',
+                    'Oficial: ${tasaOficial!.toStringAsFixed(2)}',
                     style: const TextStyle(fontSize: 13),
                   ),
-                  if (fechaMayor != null) ...[
+                  if (fechaOficial != null) ...[
                     const SizedBox(width: 8),
                     Text(
-                      fechaMayor!,
+                      fechaOficial!,
                       style: const TextStyle(
                         fontSize: 11,
                         color: Colors.black54,
@@ -881,6 +953,52 @@ class _TasaCard extends StatelessWidget {
                   ],
                 ],
               ),
+              const SizedBox(height: 4),
+              if (tasaMayor != null)
+                Row(
+                  children: [
+                    Text(
+                      'Mayorista: ${tasaMayor!.toStringAsFixed(2)}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    if (fechaMayor != null) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        fechaMayor!,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.black54,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+            ] else ...[
+              const Text(
+                'La tasa no esta disponible por ahora.',
+                style: TextStyle(fontSize: 13),
+              ),
+            ],
+            if (errorMessage != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                errorMessage!,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: cs.error,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: () => onRetry(),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Actualizar'),
+              ),
+            ),
           ],
         ),
       ),
@@ -916,18 +1034,21 @@ class _PricePill extends StatelessWidget {
 class _StockTile extends StatelessWidget {
   final String tienda;
   final int existencia;
+  final dynamic status;
   final bool isCasaMatriz;
   const _StockTile({
     required this.tienda,
     required this.existencia,
+    required this.status,
     this.isCasaMatriz = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final bg =
-        isCasaMatriz ? Colors.amber.shade100 : cs.surfaceVariant.withOpacity(.4);
+    final bg = isCasaMatriz
+        ? Colors.amber.shade100
+        : cs.surfaceVariant.withOpacity(.4);
     final icon = isCasaMatriz ? Icons.home_filled : Icons.storefront;
 
     return Material(
@@ -935,8 +1056,7 @@ class _StockTile extends StatelessWidget {
       borderRadius: BorderRadius.circular(12),
       child: ListTile(
         dense: true,
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
         leading: CircleAvatar(
           radius: 16,
           backgroundColor: Colors.white,
@@ -948,9 +1068,15 @@ class _StockTile extends StatelessWidget {
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
         ),
-        trailing: _QtyPill(value: existencia),
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _QtyPill(value: existencia),
+            const SizedBox(width: 8),
+            _StatusPill(status: status),
+          ],
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }
@@ -981,11 +1107,58 @@ class _QtyPill extends StatelessWidget {
   }
 }
 
+class _StatusPill extends StatelessWidget {
+  final dynamic status;
+  const _StatusPill({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final raw = (status ?? '').toString().trim();
+    final hasStatus = raw.isNotEmpty;
+    final normalized = raw.toLowerCase();
+    final isActive =
+        normalized == '1' || normalized == 'true' || normalized == 'activo';
+    final label = !hasStatus
+        ? 'Sin estado'
+        : isActive
+            ? 'Activo'
+            : 'Inactivo';
+    final bgColor = !hasStatus
+        ? cs.surfaceVariant.withOpacity(0.65)
+        : isActive
+            ? Colors.green.withOpacity(0.14)
+            : Colors.red.withOpacity(0.12);
+    final textColor = !hasStatus
+        ? cs.onSurfaceVariant
+        : isActive
+            ? Colors.green.shade800
+            : Colors.red.shade800;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: textColor,
+          fontWeight: FontWeight.w800,
+          letterSpacing: .1,
+        ),
+      ),
+    );
+  }
+}
+
 class _TotalTile extends StatelessWidget {
   final String label;
   final int total;
   final Color color;
-  const _TotalTile({required this.label, required this.total, required this.color});
+  const _TotalTile(
+      {required this.label, required this.total, required this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -1051,7 +1224,7 @@ class _SinExistenciaCard extends StatelessWidget {
           SizedBox(width: 12),
           Expanded(
             child: Text(
-              'Sin existencia en ninguna sucursal ni Casa Matriz ni con status 1.',
+              'Sin existencia en ninguna sucursal ni bodega.',
               style: TextStyle(fontWeight: FontWeight.w700),
             ),
           ),
@@ -1072,12 +1245,15 @@ class ScanPage extends StatefulWidget {
 
 class _ScanPageState extends State<ScanPage> {
   final MobileScannerController controller = MobileScannerController(
+    autoStart: false,
     detectionSpeed: DetectionSpeed.normal,
     facing: CameraFacing.back,
     torchEnabled: false,
   );
 
   bool _handled = false;
+  bool _startingScanner = true;
+  String? _cameraNotice;
 
   // ===== NUEVO: estabilidad para evitar códigos “inventados” =====
   String? _lastValue;
@@ -1085,9 +1261,34 @@ class _ScanPageState extends State<ScanPage> {
   DateTime? _lastSeen;
 
   @override
+  void initState() {
+    super.initState();
+    unawaited(_startScanner());
+  }
+
+  @override
   void dispose() {
     controller.dispose();
     super.dispose();
+  }
+
+  Future<void> _startScanner({bool clearNotice = false}) async {
+    if (mounted) {
+      setState(() {
+        _startingScanner = true;
+        if (clearNotice) {
+          _cameraNotice = null;
+        }
+      });
+    }
+
+    final notice = await startScannerWithFallback(controller);
+
+    if (!mounted) return;
+    setState(() {
+      _startingScanner = false;
+      _cameraNotice = notice;
+    });
   }
 
   // ===== NUEVO: helpers para filtrar/validar EAN-13 y UPC-A =====
@@ -1171,7 +1372,15 @@ class _ScanPageState extends State<ScanPage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.cameraswitch),
-            onPressed: () => controller.switchCamera(),
+            onPressed: _startingScanner
+                ? null
+                : () async {
+                    await controller.switchCamera();
+                    if (!mounted) return;
+                    setState(() {
+                      _cameraNotice = null;
+                    });
+                  },
             tooltip: 'Cambiar cámara',
           ),
           IconButton(
@@ -1197,8 +1406,16 @@ class _ScanPageState extends State<ScanPage> {
               MobileScanner(
                 controller: controller,
                 onDetect: _onDetect,
+                errorBuilder: (context, error, child) => ScannerErrorView(
+                  error: error,
+                  onRetry: () => _startScanner(clearNotice: true),
+                ),
                 scanWindow: scanWindow, // <-- limita detección al recuadro
               ),
+              if (_startingScanner)
+                const Center(
+                  child: CircularProgressIndicator(color: Colors.white),
+                ),
               Align(
                 alignment: Alignment.center,
                 child: Container(
@@ -1210,6 +1427,29 @@ class _ScanPageState extends State<ScanPage> {
                   ),
                 ),
               ),
+              if (_cameraNotice != null)
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 24,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black87,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(
+                        _cameraNotice!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           );
         },

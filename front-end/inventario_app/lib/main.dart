@@ -1,8 +1,9 @@
-// lib/main.dart
 import 'package:flutter/material.dart';
 
+import 'app_session.dart';
 import 'screen/consultacompra.dart';
 import 'screen/consultaprecio.dart';
+import 'screen/login_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -11,21 +12,42 @@ void main() {
 
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
   @override
   State<MyApp> createState() => _MyAppState();
 }
 
 class _MyAppState extends State<MyApp> {
   int _paginaActual = 0;
+  AppSession? _session;
+  PageStorageBucket _bucket = PageStorageBucket();
 
-  // Preserva el estado de cada pestaña (scroll/inputs)
-  final PageStorageBucket _bucket = PageStorageBucket();
+  List<Widget> _buildPaginas(AppSession session) => [
+        ScreenConsulta(
+          key: PageStorageKey('consulta-${session.username}'),
+          session: session,
+        ),
+        ScreenCompras(
+          key: PageStorageKey('compras-${session.username}'),
+          session: session,
+        ),
+      ];
 
-  // Páginas con claves para PageStorage (solo 2 tabs)
-  final List<Widget> _paginas = const [
-    ScreenConsulta(key: PageStorageKey('consulta')),
-    ScreenCompras(key: PageStorageKey('compras')),
-  ];
+  void _handleLogin(AppSession session) {
+    setState(() {
+      _session = session;
+      _paginaActual = 0;
+      _bucket = PageStorageBucket();
+    });
+  }
+
+  void _handleLogout() {
+    setState(() {
+      _session = null;
+      _paginaActual = 0;
+      _bucket = PageStorageBucket();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -44,21 +66,47 @@ class _MyAppState extends State<MyApp> {
           bodyMedium: TextStyle(color: Colors.black),
         ),
       ),
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text(
-            'Blumer',
-            style: TextStyle(fontWeight: FontWeight.bold),
-          ),
-          backgroundColor: const Color.fromARGB(255, 240, 240, 240),
-          elevation: 0,
-        ),
-        body: PageStorage(
-          bucket: _bucket,
-          child: IndexedStack(index: _paginaActual, children: _paginas),
-        ),
-        bottomNavigationBar: _buildBottomNavigationBar(),
-      ),
+      home: _session == null
+          ? LoginScreen(onLogin: _handleLogin)
+          : Scaffold(
+              appBar: AppBar(
+                title: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Blumer',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    Text(
+                      _session!.displayName,
+                      style: const TextStyle(
+                        color: Colors.black54,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+                backgroundColor: const Color.fromARGB(255, 240, 240, 240),
+                elevation: 0,
+                actions: [
+                  IconButton(
+                    onPressed: _handleLogout,
+                    tooltip: 'Cerrar sesion',
+                    icon: const Icon(Icons.logout),
+                  ),
+                ],
+              ),
+              body: PageStorage(
+                bucket: _bucket,
+                child: IndexedStack(
+                  index: _paginaActual,
+                  children: _buildPaginas(_session!),
+                ),
+              ),
+              bottomNavigationBar: _buildBottomNavigationBar(),
+            ),
     );
   }
 

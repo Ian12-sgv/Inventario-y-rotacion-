@@ -5,14 +5,21 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:http/http.dart' as http;
 
+import '../app_session.dart';
+import '../platform_support.dart';
+import '../scanner_support.dart';
+
 // ===== Config de API (se puede sobreescribir con --dart-define) =====
-const String kComprasApiBase =
-    String.fromEnvironment('COMPRAS_API_BASE', defaultValue: 'https://api3.apipalacio.com');
-const String kApiKey =
-    String.fromEnvironment('API_KEY', defaultValue: 'k9mWIm4Nd3j9KomxkT28cBqJY4eYeWm58X+Fmp1Kq0g=');
+const String kComprasApiBase = String.fromEnvironment('COMPRAS_API_BASE',
+    defaultValue: 'https://api3.apipalacio.com');
 
 class ScreenCompras extends StatefulWidget {
-  const ScreenCompras({super.key});
+  const ScreenCompras({
+    super.key,
+    required this.session,
+  });
+
+  final AppSession session;
 
   @override
   State<ScreenCompras> createState() => _ScreenComprasState();
@@ -25,9 +32,10 @@ class _ScreenComprasState extends State<ScreenCompras> {
   List<Map<String, dynamic>> _registros = [];
   int _totalCantidad = 0;
 
-  Future<List<Map<String, dynamic>>> _fetchComprasPorCodigo(String codigo) async {
+  Future<List<Map<String, dynamic>>> _fetchComprasPorCodigo(
+      String codigo) async {
     final uri = Uri.parse('$kComprasApiBase/api/productos/$codigo');
-    final resp = await http.get(uri, headers: {'x-api-key': kApiKey});
+    final resp = await http.get(uri, headers: widget.session.authHeaders);
 
     if (resp.statusCode == 200) {
       final body = jsonDecode(resp.body);
@@ -45,15 +53,33 @@ class _ScreenComprasState extends State<ScreenCompras> {
       return []; // no encontrado
     }
 
-    // Intenta leer problem+json
+    Object? parsedBody;
     try {
-      final p = jsonDecode(resp.body);
-      final title = p['title'] ?? 'Error';
-      final detail = p['detail'] ?? 'Fallo en la solicitud.';
-      throw Exception('$title: $detail');
-    } catch (_) {
-      throw Exception('HTTP ${resp.statusCode}: ${resp.reasonPhrase}');
+      parsedBody = jsonDecode(resp.body);
+    } catch (_) {}
+
+    if (parsedBody is Map<String, dynamic>) {
+      final error = (parsedBody['error'] ?? '').toString();
+      if (error == 'invalid_credentials' || error == 'invalid_api_key') {
+        throw Exception(
+            'Acceso no autorizado. Verifica tu usuario y contrasena.');
+      }
+
+      final title = (parsedBody['title'] ?? '').toString();
+      final detail = (parsedBody['detail'] ?? '').toString();
+      if (title.isNotEmpty || detail.isNotEmpty) {
+        final prefix = title.isNotEmpty ? '$title: ' : '';
+        throw Exception(
+            '${prefix}${detail.isNotEmpty ? detail : 'Fallo en la solicitud.'}');
+      }
     }
+
+    if (resp.statusCode == 401) {
+      throw Exception(
+          'Acceso no autorizado. Verifica tu usuario y contrasena.');
+    }
+
+    throw Exception('HTTP ${resp.statusCode}: ${resp.reasonPhrase}');
   }
 
   Future<void> _buscarRegistrosPorCodigo(String codigoBarra) async {
@@ -93,8 +119,18 @@ class _ScreenComprasState extends State<ScreenCompras> {
     }
   }
 
-  // Escaneo con mobile_scanner
   Future<void> _scanBarcode() async {
+    if (isDesktopPlatform) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'En escritorio usa el teclado o un lector USB y presiona Enter.',
+          ),
+        ),
+      );
+      return;
+    }
+
     try {
       final scanned = await Navigator.push<String>(
         context,
@@ -152,7 +188,10 @@ class _ScreenComprasState extends State<ScreenCompras> {
                   border: Border.all(color: cs.outlineVariant.withOpacity(.3)),
                   borderRadius: BorderRadius.circular(12),
                   boxShadow: const [
-                    BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3))
+                    BoxShadow(
+                        color: Colors.black12,
+                        blurRadius: 6,
+                        offset: Offset(0, 3))
                   ],
                 ),
                 child: TextField(
@@ -161,19 +200,23 @@ class _ScreenComprasState extends State<ScreenCompras> {
                   onSubmitted: (v) => _buscarRegistrosPorCodigo(v),
                   decoration: InputDecoration(
                     hintText: 'Buscar código de barras',
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
                     border: InputBorder.none,
                     suffixIcon: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         IconButton(
                           icon: const Icon(Icons.search),
-                          onPressed: () => _buscarRegistrosPorCodigo(_searchController.text),
+                          onPressed: () =>
+                              _buscarRegistrosPorCodigo(_searchController.text),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.qr_code_scanner),
-                          onPressed: _scanBarcode,
-                        ),
+                        if (!isDesktopPlatform)
+                          IconButton(
+                            icon: const Icon(Icons.qr_code_scanner),
+                            onPressed: _scanBarcode,
+                            tooltip: 'Escanear',
+                          ),
                       ],
                     ),
                   ),
@@ -181,10 +224,11 @@ class _ScreenComprasState extends State<ScreenCompras> {
               ),
             ),
 
-            if (_loading) const Padding(
-              padding: EdgeInsets.only(top: 8),
-              child: CircularProgressIndicator(),
-            ),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: CircularProgressIndicator(),
+              ),
 
             // Resumen
             if (!_loading && _registros.isNotEmpty)
@@ -233,7 +277,8 @@ class _ScreenComprasState extends State<ScreenCompras> {
         return Card(
           elevation: 0.5,
           margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: Padding(
             padding: const EdgeInsets.all(14),
             child: Column(
@@ -241,9 +286,12 @@ class _ScreenComprasState extends State<ScreenCompras> {
               children: [
                 _buildRegistroCabecera('Grupo Palacios', doc),
                 const Divider(),
-                _buildRegistroDetalle(Icons.qr_code, 'Código', _asString(r['CodigoBarra'])),
-                _buildRegistroDetalle(Icons.article, 'Referencia', _asString(r['Referencia'])),
-                _buildRegistroDetalle(Icons.label, 'Nombre', _asString(r['Nombre'])),
+                _buildRegistroDetalle(
+                    Icons.qr_code, 'Código', _asString(r['CodigoBarra'])),
+                _buildRegistroDetalle(
+                    Icons.article, 'Referencia', _asString(r['Referencia'])),
+                _buildRegistroDetalle(
+                    Icons.label, 'Nombre', _asString(r['Nombre'])),
                 _buildRegistroDetalle(Icons.shopping_cart, 'Cantidad', '$cant'),
                 _buildRegistroDetalle(Icons.date_range, 'Fecha Compra', fecha),
               ],
@@ -259,11 +307,13 @@ class _ScreenComprasState extends State<ScreenCompras> {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Text(galpon,
-            style:
-                const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF646464))),
+            style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF646464))),
         Text('Doc: $documento',
-            style:
-                const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey)),
+            style: const TextStyle(
+                fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey)),
       ],
     );
   }
@@ -276,7 +326,10 @@ class _ScreenComprasState extends State<ScreenCompras> {
           Icon(icon, size: 20, color: Colors.blueGrey),
           const SizedBox(width: 10),
           Text('$label:',
-              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: Colors.grey)),
+              style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.grey)),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
@@ -284,7 +337,10 @@ class _ScreenComprasState extends State<ScreenCompras> {
               textAlign: TextAlign.right,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.grey),
+              style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey),
             ),
           ),
         ],
@@ -304,17 +360,45 @@ class ScanPage extends StatefulWidget {
 
 class _ScanPageState extends State<ScanPage> {
   final MobileScannerController controller = MobileScannerController(
+    autoStart: false,
     detectionSpeed: DetectionSpeed.noDuplicates,
     facing: CameraFacing.back,
     torchEnabled: false,
   );
 
   bool _handled = false;
+  bool _startingScanner = true;
+  String? _cameraNotice;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_startScanner());
+  }
 
   @override
   void dispose() {
     controller.dispose();
     super.dispose();
+  }
+
+  Future<void> _startScanner({bool clearNotice = false}) async {
+    if (mounted) {
+      setState(() {
+        _startingScanner = true;
+        if (clearNotice) {
+          _cameraNotice = null;
+        }
+      });
+    }
+
+    final notice = await startScannerWithFallback(controller);
+
+    if (!mounted) return;
+    setState(() {
+      _startingScanner = false;
+      _cameraNotice = notice;
+    });
   }
 
   void _onDetect(BarcodeCapture capture) {
@@ -338,7 +422,15 @@ class _ScanPageState extends State<ScanPage> {
         actions: [
           IconButton(
               icon: const Icon(Icons.cameraswitch),
-              onPressed: () => controller.switchCamera(),
+              onPressed: _startingScanner
+                  ? null
+                  : () async {
+                      await controller.switchCamera();
+                      if (!mounted) return;
+                      setState(() {
+                        _cameraNotice = null;
+                      });
+                    },
               tooltip: 'Cambiar cámara'),
           IconButton(
               icon: const Icon(Icons.flash_on),
@@ -348,7 +440,18 @@ class _ScanPageState extends State<ScanPage> {
       ),
       body: Stack(
         children: [
-          MobileScanner(controller: controller, onDetect: _onDetect),
+          MobileScanner(
+            controller: controller,
+            onDetect: _onDetect,
+            errorBuilder: (context, error, child) => ScannerErrorView(
+              error: error,
+              onRetry: () => _startScanner(clearNotice: true),
+            ),
+          ),
+          if (_startingScanner)
+            const Center(
+              child: CircularProgressIndicator(color: Colors.white),
+            ),
           Align(
             alignment: Alignment.center,
             child: Container(
@@ -360,6 +463,29 @@ class _ScanPageState extends State<ScanPage> {
               ),
             ),
           ),
+          if (_cameraNotice != null)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 24,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.black87,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text(
+                    _cameraNotice!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );

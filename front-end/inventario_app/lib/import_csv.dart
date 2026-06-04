@@ -35,7 +35,17 @@ class CsvImporter {
     );
 
     // índices (se asignan 1 sola vez al leer el header)
-    late final int iCodigo, iRef, iNombre, iPD, iPM, iPP, iExist, iTienda, iRegion, iCostoUsd, iCostoMayorUsd;
+    late final int iCodigo,
+        iRef,
+        iNombre,
+        iPD,
+        iPM,
+        iPP,
+        iExist,
+        iTienda,
+        iRegion,
+        iCostoUsd,
+        iCostoMayorUsd;
     bool mapped = false;
 
     // progreso total (opcional)
@@ -71,55 +81,132 @@ class CsvImporter {
 
           // ---- Mapear índices tolerantes (una sola vez) ----
           iCodigo = _colAny(headers, [
-            'CodigoBarra','Codigo_Barra','CodigoBarras','CodBarra','CB',
-            'Barcode','bar_code','barcode','EAN','Codigo','CodigoEAN'
+            'CodigoBarra',
+            'Codigo_Barra',
+            'CodigoBarras',
+            'CodBarra',
+            'CB',
+            'Barcode',
+            'bar_code',
+            'barcode',
+            'EAN',
+            'Codigo',
+            'CodigoEAN'
           ]);
           iRef = _colAny(headers, [
-            'Referencia','Ref','CodigoProducto','Codigo_Producto',
-            'CodigoInterno','SKU','reference'
+            'Referencia',
+            'Ref',
+            'CodigoProducto',
+            'Codigo_Producto',
+            'CodigoInterno',
+            'SKU',
+            'reference'
           ]);
           iNombre = _colAny(headers, [
-            'NombreProducto','Nombre','Descripcion','DescripcionProducto',
-            'product_name','product','productname'
+            'NombreProducto',
+            'Nombre',
+            'Descripcion',
+            'DescripcionProducto',
+            'product_name',
+            'product',
+            'productname'
           ]);
-          iPD = _colAny(headers, [
-            'PrecioDetal','PrecioDetalle','Precio_Detal',
-            'price_detal','price_detail','price_retail','retail_price'
-          ], required: false);
-          iPM = _colAny(headers, [
-            'PrecioMayor','Precio_Mayor','price_mayor','price_wholesale',
-            'wholesale_price'
-          ], required: false);
-          iPP = _colAny(headers, [
-            'PrecioPromocion','PrecioPromo','Precio_Promocion',
-            'price_promo','promo_price','discount_price'
-          ], required: false);
+          iPD = _colAny(
+              headers,
+              [
+                'PrecioDetal',
+                'PrecioDetalle',
+                'Precio_Detal',
+                'price_detal',
+                'price_detail',
+                'price_retail',
+                'retail_price'
+              ],
+              required: false);
+          iPM = _colAny(
+              headers,
+              [
+                'PrecioMayor',
+                'Precio_Mayor',
+                'price_mayor',
+                'price_wholesale',
+                'wholesale_price'
+              ],
+              required: false);
+          iPP = _colAny(
+              headers,
+              [
+                'PrecioPromocion',
+                'PrecioPromo',
+                'Precio_Promocion',
+                'price_promo',
+                'promo_price',
+                'discount_price'
+              ],
+              required: false);
 
           // NUEVO: costo/dólar detal (alias incluye CostoInicial->CostoDolar)
-          iCostoUsd = _colAny(headers, [
-            'CostoDolar','Costo_Dolar','CostoUSD','PrecioUSD','USD',
-            'CostoEnDolares','Dolares','DollarCost','usd_cost',
-            'Dolar','PrecioDolar','Precio_Dolar'
-          ], required: false);
+          iCostoUsd = _colAny(
+              headers,
+              [
+                'CostoDolar',
+                'Costo_Dolar',
+                'CostoUSD',
+                'PrecioUSD',
+                'USD',
+                'CostoEnDolares',
+                'Dolares',
+                'DollarCost',
+                'usd_cost',
+                'Dolar',
+                'PrecioDolar',
+                'Precio_Dolar'
+              ],
+              required: false);
 
           // NUEVO: dólar mayor (alias de CAST(ROUND(c.CostoPromedio,2)) AS dolarMayor)
-          iCostoMayorUsd = _colAny(headers, [
-            'dolarMayor','DolarMayor','PrecioMayorUSD','CostoPromedio','Costo_Promedio',
-            'MayorUSD','CostoMayorDolar','Costo_Mayor_Dolar'
-          ], required: false);
+          iCostoMayorUsd = _colAny(
+              headers,
+              [
+                'dolarMayor',
+                'DolarMayor',
+                'PrecioMayorUSD',
+                'CostoPromedio',
+                'Costo_Promedio',
+                'MayorUSD',
+                'CostoMayorDolar',
+                'Costo_Mayor_Dolar'
+              ],
+              required: false);
 
           // Existencia + tienda + región
-          iExist = _colAny(headers, [
-            'ExistenciaPorTienda','Existencia','Stock','ExistenciaTienda',
-            'stock','qty','quantity'
-          ], required: false);
+          iExist = _colAny(
+              headers,
+              [
+                'ExistenciaPorTienda',
+                'Existencia',
+                'Stock',
+                'ExistenciaTienda',
+                'stock',
+                'qty',
+                'quantity'
+              ],
+              required: false);
           iTienda = _colAny(headers, [
-            'Tienda','NombreTienda','Sucursal','Almacen','Bodega','NombreSucursal',
-            'store_name','store','branch','warehouse'
+            'Tienda',
+            'NombreTienda',
+            'Sucursal',
+            'Almacen',
+            'Bodega',
+            'NombreSucursal',
+            'store_name',
+            'store',
+            'branch',
+            'warehouse'
           ]);
-          iRegion = _colAny(headers, [
-            'Region','Zona','Area','region','zone'
-          ], required: false);
+          iRegion = _colAny(
+              headers, ['Region', 'Zona', 'Area', 'region', 'zone'],
+              required: false);
 
           mapped = true;
           isFirst = false;
@@ -144,8 +231,8 @@ class CsvImporter {
 
         // ===== 2) inventarioc: 1 fila por producto =====
         if (seen.add(codigo)) {
-          final costoUsd = _d(row, iCostoUsd);               // 0.0 si no hay
-          final costoMayorUsd = _d(row, iCostoMayorUsd);     // 0.0 si no hay
+          final costoUsd = _d(row, iCostoUsd); // 0.0 si no hay
+          final costoMayorUsd = _d(row, iCostoMayorUsd); // 0.0 si no hay
           batch.insert(
             'inventarioc',
             {
@@ -155,8 +242,8 @@ class CsvImporter {
               'PrecioDetal': _s(row, iPD),
               'PrecioMayor': _s(row, iPM),
               'PrecioPromocion': _s(row, iPP),
-              'CostoDolar': costoUsd,        // dólar detal
-              'DolarMayor': costoMayorUsd,   // dólar mayor (nuevo)
+              'CostoDolar': costoUsd, // dólar detal
+              'DolarMayor': costoMayorUsd, // dólar mayor (nuevo)
               'CREACION': '',
             },
             conflictAlgorithm: ConflictAlgorithm.replace,
@@ -256,23 +343,49 @@ class CsvImporter {
           final headers = row.map((e) => e.toString()).toList();
 
           iCodigo = _colAny(headers, [
-            'CodigoBarra','CodBarra','CB','Barcode','barcode','EAN','Codigo'
+            'CodigoBarra',
+            'CodBarra',
+            'CB',
+            'Barcode',
+            'barcode',
+            'EAN',
+            'Codigo'
           ]);
           iRef = _colAny(headers, [
-            'Referencia','Ref','CodigoProducto','CodigoInterno','SKU','reference'
+            'Referencia',
+            'Ref',
+            'CodigoProducto',
+            'CodigoInterno',
+            'SKU',
+            'reference'
           ]);
           iNombre = _colAny(headers, [
-            'NombreProducto','Nombre','Descripcion','product_name','product'
+            'NombreProducto',
+            'Nombre',
+            'Descripcion',
+            'product_name',
+            'product'
           ]);
           iDoc = _colAny(headers, [
-            'Documento','NroDocumento','NumeroDocumento','Doc','Factura','NumDoc',
-            'document','invoice','invoice_number'
+            'Documento',
+            'NroDocumento',
+            'NumeroDocumento',
+            'Doc',
+            'Factura',
+            'NumDoc',
+            'document',
+            'invoice',
+            'invoice_number'
           ]);
-          iCant = _colAny(headers, [
-            'Cantidad','cant','Unidades','quantity','qty'
-          ]);
+          iCant = _colAny(
+              headers, ['Cantidad', 'cant', 'Unidades', 'quantity', 'qty']);
           iFecha = _colAny(headers, [
-            'Fecha','FechaCompra','FecCompra','Fecha_Doc','date','purchase_date'
+            'Fecha',
+            'FechaCompra',
+            'FecCompra',
+            'Fecha_Doc',
+            'date',
+            'purchase_date'
           ]);
 
           mapped = true;
@@ -338,19 +451,23 @@ class CsvImporter {
 
     // Si las tablas ya existían sin estas columnas, ALTER TABLE.
     if (!await _colExists(txn, 'inventarioc', 'CostoDolar')) {
-      await txn.execute("ALTER TABLE inventarioc ADD COLUMN CostoDolar REAL DEFAULT 0;");
+      await txn.execute(
+          "ALTER TABLE inventarioc ADD COLUMN CostoDolar REAL DEFAULT 0;");
     }
     if (!await _colExists(txn, 'inventarioc', 'DolarMayor')) {
-      await txn.execute("ALTER TABLE inventarioc ADD COLUMN DolarMayor REAL DEFAULT 0;");
+      await txn.execute(
+          "ALTER TABLE inventarioc ADD COLUMN DolarMayor REAL DEFAULT 0;");
     }
     if (!await _colExists(txn, 'stock', 'Region')) {
       await txn.execute("ALTER TABLE stock ADD COLUMN Region TEXT;");
     }
   }
 
-  Future<bool> _colExists(DatabaseExecutor txn, String table, String col) async {
+  Future<bool> _colExists(
+      DatabaseExecutor txn, String table, String col) async {
     final info = await txn.rawQuery("PRAGMA table_info($table)");
-    return info.any((c) => (c['name'] as String?)?.toLowerCase() == col.toLowerCase());
+    return info
+        .any((c) => (c['name'] as String?)?.toLowerCase() == col.toLowerCase());
   }
 
   // ===== utils =====
@@ -372,7 +489,8 @@ class CsvImporter {
     for (final c in candidates.keys.toList()) {
       candidates[c] = _count(firstLine, c);
     }
-    final best = candidates.entries.reduce((a, b) => a.value >= b.value ? a : b);
+    final best =
+        candidates.entries.reduce((a, b) => a.value >= b.value ? a : b);
     return best.value == 0 ? ',' : best.key;
   }
 
@@ -414,7 +532,8 @@ class CsvImporter {
   }
 
   /// Busca cualquiera de los alias normalizados; si no encuentra y [required]=true, lanza error claro.
-  int _colAny(List<String> headers, List<String> aliases, {bool required = true}) {
+  int _colAny(List<String> headers, List<String> aliases,
+      {bool required = true}) {
     final normHeaders = headers.map(_norm).toList();
     final normAliases = aliases.map(_norm).toList();
     for (var i = 0; i < normHeaders.length; i++) {

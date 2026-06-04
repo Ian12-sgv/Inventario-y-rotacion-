@@ -69,25 +69,25 @@ Future<void> _ensureSchema(Database db) async {
   ''');
 
   // Índices útiles (opcionales)
-  await db.execute('CREATE INDEX IF NOT EXISTS idx_stock_cod ON stock (CodigoBarra);');
-  await db.execute('CREATE INDEX IF NOT EXISTS idx_comp_doc ON comprasgalpones (Documento);');
+  await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_stock_cod ON stock (CodigoBarra);');
+  await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_comp_doc ON comprasgalpones (Documento);');
 }
 
 /// Verificación rápida de que existen las tablas esperadas.
 Future<bool> databaseHasExpectedSchema() async {
   final db = await openDatabaseConnection();
-  final res = await db.rawQuery(
-    "SELECT name FROM sqlite_master WHERE type='table' "
-    "AND name IN ('inventarioc','stock','comprasgalpones');"
-  );
+  final res =
+      await db.rawQuery("SELECT name FROM sqlite_master WHERE type='table' "
+          "AND name IN ('inventarioc','stock','comprasgalpones');");
   return res.length == 3;
 }
 
 /// Compatibilidad: ya no usamos paquetes .gz. Si alguien lo llama por error, avisamos.
 @Deprecated('Ya no se usa; el flujo actual importa CSV directamente.')
-Future<void> replaceDatabaseFromGzip(
-  String _,
-  {bool keepBackup = true, int minAcceptableBytes = 256}
-) async {
-  throw UnsupportedError('replaceDatabaseFromGzip() está obsoleto. Usa el importador CSV.');
+Future<void> replaceDatabaseFromGzip(String _,
+    {bool keepBackup = true, int minAcceptableBytes = 256}) async {
+  throw UnsupportedError(
+      'replaceDatabaseFromGzip() está obsoleto. Usa el importador CSV.');
 }

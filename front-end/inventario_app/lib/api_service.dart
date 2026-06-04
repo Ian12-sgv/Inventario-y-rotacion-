@@ -7,8 +7,9 @@ import 'package:http/http.dart' as http;
 
 /// Configuración de una API (base URL + API key).
 class ApiConfig {
-  final String baseUrl; // ej: http://127.0.0.1:5100 o https://api2.apipalacio.com
-  final String apiKey;  // header x-api-key
+  final String
+      baseUrl; // ej: http://127.0.0.1:5100 o https://api2.apipalacio.com
+  final String apiKey; // header x-api-key
   final Duration timeout;
 
   const ApiConfig({
@@ -53,8 +54,8 @@ class ApiError {
 /// Excepción de alto nivel para UI (mensaje listo para mostrar)
 class ApiFailure implements IOException {
   final int? statusCode; // null si no hubo respuesta HTTP (internet/timeout)
-  final String code;     // e.g. scan_too_fast, db_error, no_internet, timeout
-  final String message;  // mensaje para el usuario
+  final String code; // e.g. scan_too_fast, db_error, no_internet, timeout
+  final String message; // mensaje para el usuario
   final String? traceId; // viene del backend cuando aplica
   final String? rawBody; // útil para debug
 
@@ -76,7 +77,8 @@ class ApiService {
   final ApiConfig cfg;
   final http.Client _client;
 
-  ApiService(this.cfg, {http.Client? client}) : _client = client ?? http.Client();
+  ApiService(this.cfg, {http.Client? client})
+      : _client = client ?? http.Client();
 
   Map<String, String> get _headers => {
         'x-api-key': cfg.apiKey,
@@ -258,7 +260,8 @@ class ApiService {
     }
   }
 
-  static String _friendlyMessageForCode(String code, String backendMessage, int status) {
+  static String _friendlyMessageForCode(
+      String code, String backendMessage, int status) {
     // Si el backend ya envía un mensaje adecuado, lo respetamos,
     // pero para códigos conocidos priorizamos mensajes consistentes.
     switch (code) {
