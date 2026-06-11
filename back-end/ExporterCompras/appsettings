@@ -15,6 +15,6 @@
     "CsvName": "compras.csv"
   },
   "Query": {
-    "SqlText": "SELECT mc.CodigoBarra, i.Referencia, i.Nombre AS Nombre, c.Documento, mc.Cantidad, CONVERT(date, c.Fecha) AS FechaCompra FROM dbo.MOVCOMPRAS AS mc INNER JOIN dbo.COMPRAS    AS c ON c.Documento   = mc.Documento INNER JOIN dbo.INVENTARIO AS i ON i.CodigoBarra = mc.CodigoBarra ORDER BY c.Fecha DESC, c.Documento;"
+    "SqlText": "SELECT m.CodigoBarra, i.Referencia, i.Nombre, c.Documento, m.Cantidad, CONVERT(date, c.Fecha) AS FechaCompra FROM dbo.COMPRAS AS c INNER JOIN dbo.MOVCOMPRAS AS m ON c.Documento = m.Documento AND c.Proveedor = m.Proveedor OUTER APPLY (SELECT TOP (1) inv.Referencia, inv.Nombre FROM dbo.INVENTARIO AS inv WHERE inv.CodigoBarra = m.CodigoBarra) AS i WHERE c.IDLote <> 1 AND c.Fecha >= CONVERT(date, '2024-01-01') AND c.Fecha < DATEADD(day, 1, CONVERT(date, GETDATE())) ORDER BY c.Fecha DESC, c.Documento DESC, c.Proveedor DESC;"
   }
 }
